@@ -20,12 +20,65 @@ run_system_preflight_checks() {
     fi
     show_success "System architecture is compatible (x86_64)."
 
-    # EFI mode check
-    if [[ ! -d "/sys/firmware/efi" ]]; then
-        show_error "System not booted in EFI mode."
-        exit 1
+    # Boot Mode Detection & User Override
+    local auto_detected_mode
+    if [[ -d "/sys/firmware/efi" ]]; then
+        auto_detected_mode="UEFI"
+    else
+        auto_detected_mode="BIOS"
     fi
-    show_success "System booted in EFI mode."
+    show_progress "Auto-detected boot mode: ${auto_detected_mode}"
+
+    local dialog_text
+    dialog_text="The installer has auto-detected the system boot mode as: ${BOLD}${auto_detected_mode}${RESET}.
+
+Please confirm if this is correct. If you are using Clover for a non-bootable NVMe drive, you should select UEFI mode even if the system is currently booted in Legacy/BIOS mode via a temporary boot device.
+
+Choosing the wrong mode can lead to an unbootable system.
+- ${BOLD}UEFI Mode:${RESET} For modern systems. Required for Clover bootloader.
+- ${BOLD}Legacy BIOS Mode:${RESET} For older systems without UEFI support.
+
+If unsure, it's usually best to accept the auto-detected mode unless you have a specific reason to override it (like the Clover scenario)."
+
+    local chosen_mode=""
+    while true; do
+        chosen_mode=$(dialog --title "Confirm System Boot Mode" \
+            --radiolist "$dialog_text" 18 75 2 \
+            "UEFI" "UEFI Mode (for modern systems, supports Clover)" \
+                $( [[ "$auto_detected_mode" == "UEFI" ]] && echo "on" || echo "off") \
+            "BIOS" "Legacy BIOS Mode (for older systems)" \
+                $( [[ "$auto_detected_mode" == "BIOS" ]] && echo "on" || echo "off") \
+            3>&1 1>&2 2>&3)
+
+        local dialog_exit_status=$?
+        if [[ $dialog_exit_status -eq 0 ]]; then # OK
+            if [[ -n "$chosen_mode" ]]; then
+                CONFIG_VARS[BOOT_MODE]="$chosen_mode"
+                break
+            else
+                show_error "No boot mode selected. Please choose either UEFI or BIOS."
+                # Loop again
+            fi
+        elif [[ $dialog_exit_status -eq 1 ]]; then # Cancel
+            show_error "Boot mode confirmation cancelled by user. Exiting."
+            exit 1
+        else # Other error (ESC, etc.)
+            show_error "An unexpected error occurred during boot mode selection. Exiting."
+            exit 1
+        fi
+    done
+
+    if [[ "${CONFIG_VARS[BOOT_MODE]}" != "$auto_detected_mode" ]]; then
+        show_warning "User has overridden auto-detected boot mode. Selected: ${CONFIG_VARS[BOOT_MODE]} (Auto-detected: $auto_detected_mode)"
+    else
+        show_success "Boot mode confirmed: ${CONFIG_VARS[BOOT_MODE]}"
+    fi
+
+    if [[ "${CONFIG_VARS[BOOT_MODE]}" == "UEFI" ]]; then
+        show_progress "Proceeding in UEFI mode..."
+    else
+        show_warning "Proceeding in Legacy BIOS mode. UEFI-specific features (like Clover for NVMe boot) will not be available."
+    fi
 
     # Memory check
     local total_ram_mb; total_ram_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)

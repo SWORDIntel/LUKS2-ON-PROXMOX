@@ -17,9 +17,25 @@ prepare_ram_environment() {
     # Use rsync for more reliable copying with progress
     rsync -ax --info=progress2 / "$RAMDISK_MNT/" --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/run --exclude=/mnt --exclude=/media --exclude="$RAMDISK_MNT"
 
+    if [[ ! -f "$RAMDISK_MNT/bin/bash" ]]; then
+        show_error "FATAL: /bin/bash not found in RAM disk at $RAMDISK_MNT/bin/bash after rsync."
+        show_error "RAM disk copy might have failed. Check rsync output/errors if visible."
+        # ls -l "$RAMDISK_MNT/bin/"
+        exit 1 # Critical error
+    fi
+    show_success "/bin/bash verified in RAM disk."
+
     # Copy the installer script
     cp "$0" "$RAMDISK_MNT/root/installer.sh"
     chmod +x "$RAMDISK_MNT/root/installer.sh"
+
+    if [[ ! -x "$RAMDISK_MNT/root/installer.sh" ]]; then
+        show_error "FATAL: Installer script /root/installer.sh not found or not executable in RAM disk."
+        show_error "RAM disk copy of installer script might have failed."
+        # ls -l "$RAMDISK_MNT/root/"
+        exit 1 # Critical error
+    fi
+    show_success "Installer script verified in RAM disk."
 
     # Copy configuration if specified
     if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then

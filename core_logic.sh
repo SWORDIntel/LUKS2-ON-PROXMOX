@@ -121,40 +121,95 @@ gather_user_options() {
 
     if [[ "$main_menu_choice" == "2" ]]; then
         CONFIG_VARS[USE_DETACHED_HEADERS]="yes"
-        local header_disk
-        local all_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]}"
-        local available_disks=()
 
-        lsblk -dno NAME,SIZE,MODEL | grep -v "loop\|sr" | sort > "$TEMP_DIR/avail_disks"
-        while read -r name size model; do
-            if ! echo "$all_disks_str" | grep -q -w "/dev/$name"; then
-                available_disks+=("/dev/$name" "$name ($size, $model)")
+        local header_candidate_disks=()
+        local all_zfs_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]}"
+        # Exclude installer device, ZFS target disks
+        lsblk -dno NAME,SIZE,MODEL | grep -v "loop\|sr" | sort | while read -r name size model; do
+            local dev_path="/dev/$name"
+            if [[ "$dev_path" == "$INSTALLER_DEVICE" ]]; then continue; fi
+            if echo "$all_zfs_disks_str" | grep -q -w "$dev_path"; then continue; fi
+            # Further exclude Clover disk if already selected (though Clover is usually selected after this)
+            if [[ -n "${CONFIG_VARS[CLOVER_DISK]:-}" ]] && [[ "$dev_path" == "${CONFIG_VARS[CLOVER_DISK]}" ]]; then continue; fi
+            header_candidate_disks+=("$dev_path" "$name ($size, $model)")
+        done
+
+        if [[ ${#header_candidate_disks[@]} -eq 0 ]]; then
+            dialog --title "No Suitable Header Disk" --msgbox "No suitable separate disks were found for detached LUKS headers (cannot use ZFS target disks or the installer media).\n\nYou can either proceed without detached headers or exit the installer to prepare/connect a suitable USB/disk." 12 70
+            if dialog --title "Detached Headers Choice" --yesno "Proceed without detached LUKS headers?" 8 60; then
+                CONFIG_VARS[USE_DETACHED_HEADERS]="no"
+            else
+                show_error "User opted to exit to prepare a header disk."
+                exit 1
             fi
-        done < "$TEMP_DIR/avail_disks"
+        else
+            if dialog --title "Header Storage Method" --yesno "Do you want to use an EXISTING PARTITION for LUKS headers (no formatting)?" 10 70; then
+                CONFIG_VARS[FORMAT_HEADER_PART]="no"
 
-        header_disk=$(dialog --title "Header Disk" --radiolist "Select a separate USB/drive for LUKS headers:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || exit 1
-        CONFIG_VARS[HEADER_DISK]="$header_disk"
+                CONFIG_VARS[HEADER_DISK]=$(dialog --title "Header Disk (Existing Partition)" --radiolist "Select disk containing the existing header partition:" 15 70 $((${#header_candidate_disks[@]} / 2)) "${header_candidate_disks[@]}" 3>&1 1>&2 2>&3) || exit 1
+
+                local existing_part_num
+                existing_part_num=$(dialog --title "Header Partition Number" --inputbox "Enter the partition number on ${CONFIG_VARS[HEADER_DISK]} for LUKS headers (e.g., 1 for ${CONFIG_VARS[HEADER_DISK]}1):" 10 60 "1" 3>&1 1>&2 2>&3) || exit 1
+
+                local p_prefix=""
+                [[ "${CONFIG_VARS[HEADER_DISK]}" == /dev/nvme* ]] && p_prefix="p"
+                CONFIG_VARS[HEADER_PART]="${CONFIG_VARS[HEADER_DISK]}${p_prefix}${existing_part_num}"
+
+                # Validate partition path (basic check)
+                if ! lsblk "${CONFIG_VARS[HEADER_PART]}" &>/dev/null ; then
+                    show_error "Invalid partition specified: ${CONFIG_VARS[HEADER_PART]}"
+                    exit 1
+                fi
+
+                CONFIG_VARS[HEADER_PART_UUID]=$(blkid -s UUID -o value "${CONFIG_VARS[HEADER_PART]}" 2>/dev/null)
+                if [[ -z "${CONFIG_VARS[HEADER_PART_UUID]}" ]]; then
+                    show_error "Could not get UUID for existing header partition ${CONFIG_VARS[HEADER_PART]}. Ensure it's formatted and accessible."
+                    exit 1
+                fi
+                show_progress "Using existing partition ${CONFIG_VARS[HEADER_PART]} (UUID: ${CONFIG_VARS[HEADER_PART_UUID]}) for LUKS headers."
+            else
+                CONFIG_VARS[FORMAT_HEADER_PART]="yes"
+                CONFIG_VARS[HEADER_DISK]=$(dialog --title "Header Disk (Format New)" --radiolist "Select a separate USB/drive to FORMAT for LUKS headers:" 15 70 $((${#header_candidate_disks[@]} / 2)) "${header_candidate_disks[@]}" 3>&1 1>&2 2>&3) || exit 1
+                # HEADER_PART will be derived in partition_and_format_disks after formatting
+            fi
+        fi
     else
         CONFIG_VARS[USE_DETACHED_HEADERS]="no"
+        CONFIG_VARS[FORMAT_HEADER_PART]="no" # Not strictly necessary but good for consistency
     fi
 
-    if (dialog --title "Legacy Boot Support" --yesno "Is a separate bootloader drive (Clover) required for this hardware (e.g., non-bootable NVMe)?" 8 70); then
-        CONFIG_VARS[USE_CLOVER]="yes"
-        local clover_disk
-        local all_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]} ${CONFIG_VARS[HEADER_DISK]:-}"
-        local available_disks=()
+    # Initialize USE_CLOVER to "no"
+    CONFIG_VARS[USE_CLOVER]="no"
+    if [[ "${CONFIG_VARS[BOOT_MODE]}" == "UEFI" ]]; then
+        if (dialog --title "Clover Bootloader (UEFI)" --yesno "Do you want to install the Clover bootloader?\n(Useful for specific UEFI hardware, like booting from non-bootable NVMe drives, or if your system has trouble booting Proxmox's GRUB directly.)" 10 75); then
+            CONFIG_VARS[USE_CLOVER]="yes"
+            local clover_disk_candidates=()
+            # Ensure HEADER_DISK is included if it was set (detached headers may or may not have been chosen)
+            local all_used_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]} ${CONFIG_VARS[HEADER_DISK]:-}"
 
-        lsblk -dno NAME,SIZE,MODEL | grep -v "loop\|sr" | sort > "$TEMP_DIR/avail_disks"
-        while read -r name size model; do
-            if ! echo "$all_disks_str" | grep -q -w "/dev/$name"; then
-                available_disks+=("/dev/$name" "$name ($size, $model)")
+            lsblk -dno NAME,SIZE,MODEL | grep -v "loop\|sr" | sort | while read -r name size model; do
+                local dev_path="/dev/$name"
+                if [[ "$dev_path" == "$INSTALLER_DEVICE" ]]; then continue; fi
+                if echo "$all_used_disks_str" | grep -q -w "$dev_path"; then continue; fi
+                clover_disk_candidates+=("$dev_path" "$name ($size, $model)")
+            done
+
+            if [[ ${#clover_disk_candidates[@]} -eq 0 ]]; then
+                dialog --title "No Suitable Clover Disk" --msgbox "No suitable separate disks were found for Clover installation (cannot use ZFS target, header, or installer disks).\n\nClover installation will be skipped." 10 70
+                CONFIG_VARS[USE_CLOVER]="no"
+            else
+                CONFIG_VARS[CLOVER_DISK]=$(dialog --title "Clover Drive" --radiolist "Select a separate drive FOR Clover bootloader (e.g., a USB stick):" 15 70 $((${#clover_disk_candidates[@]} / 2)) "${clover_disk_candidates[@]}" 3>&1 1>&2 2>&3) || {
+                    show_warning "Clover disk selection cancelled. Skipping Clover installation."
+                    CONFIG_VARS[USE_CLOVER]="no"
+                }
             fi
-        done < "$TEMP_DIR/avail_disks"
-
-        clover_disk=$(dialog --title "Clover Drive" --radiolist "Select a separate drive for the Clover bootloader:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || exit 1
-        CONFIG_VARS[CLOVER_DISK]="$clover_disk"
+        else
+            CONFIG_VARS[USE_CLOVER]="no" # User chose not to install Clover
+        fi
     else
+        # Not in UEFI mode, so Clover is not applicable/offered
         CONFIG_VARS[USE_CLOVER]="no"
+        show_progress "System is in BIOS mode. Clover installation is not applicable and will be skipped."
     fi
 
     # Network Configuration
@@ -331,34 +386,38 @@ partition_and_format_disks() {
     fi
 
     if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]:-}" == "yes" ]]; then
-        local header_disk="${CONFIG_VARS[HEADER_DISK]}"
-        show_progress "Wiping header disk: $header_disk..."
-        wipefs -a "$header_disk" &>/dev/null || true
-        sgdisk --zap-all "$header_disk" &>/dev/null || true
+        if [[ "${CONFIG_VARS[FORMAT_HEADER_PART]}" == "yes" ]]; then
+            local header_disk="${CONFIG_VARS[HEADER_DISK]}"
+            show_progress "Wiping header disk: $header_disk..."
+            wipefs -a "$header_disk" &>/dev/null || true
+            sgdisk --zap-all "$header_disk" &>/dev/null || true
 
-        sgdisk -n 1:0:0 -t 1:8300 -c 1:LUKS-Headers "$header_disk"
-        partprobe
-        sleep 2
+            sgdisk -n 1:0:0 -t 1:8300 -c 1:LUKS-Headers "$header_disk"
+            partprobe
+            sleep 2
 
-        local p_prefix=""
-        [[ "$header_disk" == /dev/nvme* ]] && p_prefix="p"
-        CONFIG_VARS[HEADER_PART]="${header_disk}${p_prefix}1"
-        mkfs.ext4 -L "LUKS_HEADERS" "${CONFIG_VARS[HEADER_PART]}"
-        # --- Detached LUKS Header Specifics ---
-        # If using detached headers, the header files themselves are stored on a separate partition.
-        # To enable the system to find these headers at boot time, the /etc/crypttab entry
-        # needs a persistent way to reference this header partition. We use its UUID.
-        # Retrieve and store the UUID of the dedicated header partition.
-        # This UUID will be used in /etc/crypttab to specify where the LUKS header files reside.
-        CONFIG_VARS[HEADER_PART_UUID]=$(blkid -s UUID -o value "${CONFIG_VARS[HEADER_PART]}" 2>/dev/null)
-        if [[ -z "${CONFIG_VARS[HEADER_PART_UUID]}" ]]; then
-            show_error "CRITICAL: Failed to retrieve UUID for header partition ${CONFIG_VARS[HEADER_PART]}."
-            show_error "This UUID is essential for the system to locate detached LUKS headers at boot."
-            show_error "Please check the device and ensure it's correctly partitioned and formatted."
-            exit 1
+            local p_prefix=""
+            [[ "$header_disk" == /dev/nvme* ]] && p_prefix="p"
+            CONFIG_VARS[HEADER_PART]="${header_disk}${p_prefix}1"
+            mkfs.ext4 -L "LUKS_HEADERS" "${CONFIG_VARS[HEADER_PART]}"
+            CONFIG_VARS[HEADER_PART_UUID]=$(blkid -s UUID -o value "${CONFIG_VARS[HEADER_PART]}" 2>/dev/null)
+            if [[ -z "${CONFIG_VARS[HEADER_PART_UUID]}" ]]; then
+                show_error "CRITICAL: Failed to retrieve UUID for header partition ${CONFIG_VARS[HEADER_PART]}."
+                show_error "This UUID is essential for the system to locate detached LUKS headers at boot."
+                show_error "Please check the device and ensure it's correctly partitioned and formatted."
+                exit 1
+            fi
+            show_progress "Header partition ${CONFIG_VARS[HEADER_PART]} has UUID: ${CONFIG_VARS[HEADER_PART_UUID]}"
+            show_success "Header disk prepared and formatted."
+        else
+            # Using an existing partition, already set in CONFIG_VARS[HEADER_PART] and CONFIG_VARS[HEADER_PART_UUID]
+            show_progress "Using existing partition ${CONFIG_VARS[HEADER_PART]} for LUKS headers. Skipping format."
+            if [[ -z "${CONFIG_VARS[HEADER_PART_UUID]}" ]]; then
+                 show_error "CRITICAL: UUID for existing header partition ${CONFIG_VARS[HEADER_PART]} is missing."
+                 exit 1
+            fi
+            show_success "Existing header partition ${CONFIG_VARS[HEADER_PART]} will be used."
         fi
-        show_progress "Header partition ${CONFIG_VARS[HEADER_PART]} has UUID: ${CONFIG_VARS[HEADER_PART_UUID]}"
-        show_success "Header disk prepared."
     fi
 
     partprobe
@@ -657,10 +716,19 @@ EOF
         apt-get update
 
         # Install essential packages
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        local grub_pkgs=""
+        if [[ "\$BOOT_MODE" == "UEFI" ]]; then
+            grub_pkgs="grub-efi-amd64 efibootmgr"
+        elif [[ "\$BOOT_MODE" == "BIOS" ]]; then
+            grub_pkgs="grub-pc"
+        else
+            echo "ERROR: Unknown BOOT_MODE '\$BOOT_MODE' in chroot." >&2
+            exit 1
+        fi
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             linux-image-amd64 linux-headers-amd64 \
             zfs-initramfs cryptsetup-initramfs \
-            grub-efi-amd64 efibootmgr \
+            \$grub_pkgs \
             bridge-utils ifupdown2
 
         # Configure network
@@ -756,14 +824,51 @@ EOF
 
         # Configure fstab
         echo "# /etc/fstab: static file system information." > /etc/fstab
-        echo "UUID=$(blkid -s UUID -o value ${BOOT_PART}) /boot ext4 defaults 0 2" >> /etc/fstab
-        echo "UUID=$(blkid -s UUID -o value ${EFI_PART}) /boot/efi vfat umask=0077 0 1" >> /etc/fstab
+        echo "UUID=\$(blkid -s UUID -o value \${BOOT_PART}) /boot ext4 defaults 0 2" >> /etc/fstab
+        if [[ "\$BOOT_MODE" == "UEFI" && -n "\$EFI_PART" ]]; then
+            local efi_part_uuid
+            efi_part_uuid=\$(blkid -s UUID -o value "\$EFI_PART" 2>/dev/null)
+            if [[ -n "\$efi_part_uuid" ]]; then
+                echo "UUID=\$efi_part_uuid /boot/efi vfat umask=0077 0 1" >> /etc/fstab
+            else
+                echo "Warning: Could not get UUID for EFI_PART \$EFI_PART. /boot/efi not added to fstab." >&2
+            fi
+        fi
+
+        # Configure GRUB command line
+        local first_luks_part_for_grub
+        first_luks_part_for_grub=\$(echo "\${LUKS_PARTITIONS}" | awk '{print \$1}')
+        local primary_luks_uuid_for_grub
+        if [[ -n "\$first_luks_part_for_grub" ]]; then
+            primary_luks_uuid_for_grub=\$(blkid -s UUID -o value "\$first_luks_part_for_grub" 2>/dev/null)
+        fi
+        if [[ -z "\$primary_luks_uuid_for_grub" ]]; then
+            echo "ERROR: Could not determine UUID for the primary LUKS partition (\$first_luks_part_for_grub from '\${LUKS_PARTITIONS}') for GRUB cmdline." >&2
+            exit 1
+        fi
+        sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"quiet\"|" /etc/default/grub
+        # Using a different sed delimiter to avoid issues with / in ZFS_POOL_NAME
+        sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"root=ZFS=\${ZFS_POOL_NAME}/ROOT cryptdevice=UUID=\${primary_luks_uuid_for_grub}:\${LUKS_MAPPER_NAME}_0\"|" /etc/default/grub
+
+        if ! grep -q "^GRUB_ENABLE_CRYPTODISK=y" /etc/default/grub; then
+            echo "GRUB_ENABLE_CRYPTODISK=y" >> /etc/default/grub
+        fi
 
         # Update initramfs
-        update-initramfs -c -k all
+        update-initramfs -u -k all
 
         # Install GRUB
-        grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=proxmox
+        if [[ "\$BOOT_MODE" == "UEFI" ]]; then
+            echo "Installing GRUB for UEFI mode..."
+            grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=proxmox --recheck
+        elif [[ "\$BOOT_MODE" == "BIOS" ]]; then
+            echo "Installing GRUB for Legacy BIOS mode to \$PRIMARY_ZFS_DISK_DEVICE_FOR_GRUB..."
+            if [[ -z "\$PRIMARY_ZFS_DISK_DEVICE_FOR_GRUB" || ! -b "\$PRIMARY_ZFS_DISK_DEVICE_FOR_GRUB" ]]; then
+                echo "ERROR: PRIMARY_ZFS_DISK_DEVICE_FOR_GRUB ('\$PRIMARY_ZFS_DISK_DEVICE_FOR_GRUB') is not set or not a block device. Cannot install GRUB." >&2
+                exit 1
+            fi
+            grub-install "\$PRIMARY_ZFS_DISK_DEVICE_FOR_GRUB" --recheck
+        fi
         update-grub
 
         # Set root password
@@ -787,6 +892,10 @@ CHROOT_SCRIPT
     chmod +x /mnt/tmp/configure.sh
 
     # Export all necessary variables for chroot script
+    export BOOT_MODE="${CONFIG_VARS[BOOT_MODE]}"
+    # Derive PRIMARY_ZFS_DISK_DEVICE_FOR_GRUB from BOOT_PART (e.g. /dev/sda2 -> /dev/sda)
+    export PRIMARY_ZFS_DISK_DEVICE_FOR_GRUB="${CONFIG_VARS[BOOT_PART]%[0-9]*}"
+    export ZFS_POOL_NAME="${CONFIG_VARS[ZFS_POOL_NAME]}"
     export HOSTNAME="${CONFIG_VARS[HOSTNAME]}"
     export NET_USE_DHCP="${CONFIG_VARS[NET_USE_DHCP]:-no}"
     export NET_IFACE="${CONFIG_VARS[NET_IFACE]:-ens18}"
