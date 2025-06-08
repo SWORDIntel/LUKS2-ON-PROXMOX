@@ -3,6 +3,19 @@
 #############################################################
 # Logging and UI Functions
 #############################################################
+
+# LOG_FILE is expected to be exported as a global variable from the main script.
+log_debug() {
+    # Ensure LOG_FILE is set and not empty before trying to write to it.
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        # Using subshell for date to avoid issues if script uses `set -e` and date fails (unlikely)
+        echo "[DEBUG][$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    else
+        # Fallback if LOG_FILE is not set, though this indicates a problem.
+        echo "[DEBUG_FALLBACK][$(date '+%Y-%m-%d %H:%M:%S')] $1" >&2
+    fi
+}
+
 show_header() {
     local text="$1"
     local width=70

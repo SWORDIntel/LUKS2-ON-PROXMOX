@@ -5,80 +5,88 @@
 #############################################################
 init_environment() {
     show_step "INIT" "Initializing Environment"
+    # LOG_FILE is now defined and exported from installer.sh
+    # TEMP_DIR is for temporary installation files, not the main log.
     TEMP_DIR=$(mktemp -d /tmp/proxmox-installer.XXXXXX)
-    LOG_FILE="$TEMP_DIR/install.log"
-    trap 'cleanup' EXIT
-    echo "Installation started at $(date)" > "$LOG_FILE"
-    show_success "Logging to $LOG_FILE"
+    # Trap is set here to ensure cleanup runs if script exits, even during init_environment.
+    # However, LOG_FILE might not be fully established if init_environment itself fails early.
+    # installer.sh now initializes LOG_FILE so it's available from the start.
+    trap 'log_debug "Cleanup trap triggered by EXIT."; cleanup' EXIT
+
+    # Append to the main log file.
+    log_debug "Entering function: ${FUNCNAME[0]}"
+    echo "Core Logic: init_environment called at $(date)" >> "$LOG_FILE"
+    echo "Temporary directory for installation files: $TEMP_DIR" >> "$LOG_FILE"
+    show_success "Main log file: $LOG_FILE"
+    show_success "Temporary directory: $TEMP_DIR"
+    log_debug "Exiting function: ${FUNCNAME[0]}"
 }
 
 cleanup() {
+    log_debug "Entering function: ${FUNCNAME[0]}"
     show_header "CLEANUP"
     show_progress "Unmounting installer filesystems..."
 
     if [[ -n "${CONFIG_VARS[ZFS_POOL_NAME]:-}" ]]; then
-        zpool export "${CONFIG_VARS[ZFS_POOL_NAME]}" &>/dev/null || true
+        log_debug "Attempting to export ZFS pool ${CONFIG_VARS[ZFS_POOL_NAME]} during cleanup."
+        zpool export "${CONFIG_VARS[ZFS_POOL_NAME]}" &>> "$LOG_FILE" || log_debug "ZFS pool export during cleanup failed (non-critical)."
+    else
+        log_debug "No ZFS pool name in CONFIG_VARS, skipping export during cleanup."
     fi
 
     local num_mappers
     num_mappers=$(echo "${CONFIG_VARS[LUKS_MAPPERS]:-}" | wc -w)
-    for i in $(seq 0 $((num_mappers - 1))); do
-        cryptsetup close "${CONFIG_VARS[LUKS_MAPPER_NAME]}_$i" &>/dev/null || true
-    done
+    log_debug "Number of LUKS mappers to close during cleanup: $num_mappers. Mappers: ${CONFIG_VARS[LUKS_MAPPERS]:-None}"
+    if [[ $num_mappers -gt 0 ]]; then
+      for i in $(seq 0 $((num_mappers - 1))); do
+          local mapper_to_close="${CONFIG_VARS[LUKS_MAPPER_NAME]}_$i"
+          log_debug "Closing LUKS mapper $mapper_to_close during cleanup."
+          cryptsetup close "$mapper_to_close" &>> "$LOG_FILE" || log_debug "cryptsetup close $mapper_to_close during cleanup failed (non-critical)."
+      done
+    fi
+    log_debug "Finished closing LUKS mappers during cleanup."
 
-    umount -lf /mnt/boot/efi &>/dev/null || true
-    umount -lf /mnt/boot &>/dev/null || true
-    umount -lf /mnt &>/dev/null || true
+    log_debug "Attempting to unmount /mnt/boot/efi, /mnt/boot, /mnt during cleanup."
+    umount -lf /mnt/boot/efi &>> "$LOG_FILE" || log_debug "Unmount /mnt/boot/efi during cleanup failed (non-critical)."
+    umount -lf /mnt/boot &>> "$LOG_FILE" || log_debug "Unmount /mnt/boot during cleanup failed (non-critical)."
+    umount -lf /mnt &>> "$LOG_FILE" || log_debug "Unmount /mnt during cleanup failed (non-critical)."
 
     if mountpoint -q "$RAMDISK_MNT"; then
+        log_debug "RAM disk $RAMDISK_MNT is mounted. Attempting to unmount its system dirs."
         show_progress "Unmounting RAM disk environment..."
-        umount -lf "$RAMDISK_MNT"/{dev,proc,sys} &>/dev/null || true
-        umount -lf "$RAMDISK_MNT" &>/dev/null || true
+        umount -lf "$RAMDISK_MNT"/{dev,proc,sys} &>> "$LOG_FILE" || log_debug "Unmount RAM disk system dirs failed (non-critical)."
+        log_debug "Attempting to unmount RAM disk $RAMDISK_MNT itself."
+        umount -lf "$RAMDISK_MNT" &>> "$LOG_FILE" || log_debug "Unmount RAM disk $RAMDISK_MNT failed (non-critical)."
+    else
+        log_debug "RAM disk $RAMDISK_MNT not mounted, skipping unmount during cleanup."
     fi
 
     if [[ -d "$TEMP_DIR" ]]; then
+        log_debug "Removing temporary directory $TEMP_DIR."
         show_progress "Removing temporary directory..."
         rm -rf "$TEMP_DIR"
+    else
+        log_debug "Temporary directory $TEMP_DIR not found, skipping removal."
     fi
 
     show_success "Cleanup complete."
+    log_debug "Exiting function: ${FUNCNAME[0]}"
+    # Final log message before script truly ends (if trap is last thing)
+    log_debug "--- Proxmox AIO Installer cleanup finished ---"
 }
 
-save_config() {
-    local file_path=$1
-    show_progress "Saving configuration to $file_path..."
-    true > "$file_path"
-    for key in "${!CONFIG_VARS[@]}"; do
-        printf "%s='%s'\n" "$key" "${CONFIG_VARS[$key]}" >> "$file_path"
-    done
-    show_success "Configuration saved."
-}
-
-load_config() {
-    local file_path=$1
-    show_progress "Loading configuration from $file_path..."
-    if [[ ! -f "$file_path" ]]; then
-        show_error "Config file not found: $file_path"
-        exit 1
-    fi
-    set +o nounset
-    # AUDIT-FIX (SC1090): Added directive to acknowledge intentional dynamic source.
-    # The script validates file existence before sourcing.
-    # shellcheck source=/dev/null
-    . "$file_path"
-    set -o nounset
-
-    local keys_to_load=(ZFS_TARGET_DISKS ZFS_RAID_LEVEL USE_DETACHED_HEADERS HEADER_DISK USE_CLOVER CLOVER_DISK NET_USE_DHCP NET_IFACE NET_IP_CIDR NET_GATEWAY NET_DNS HOSTNAME)
-
-    for key in "${keys_to_load[@]}"; do
-        if declare -p "$key" &>/dev/null; then
-            eval "CONFIG_VARS[$key]=\"\$$key\""
-        fi
-    done
-    show_success "Configuration loaded."
-}
+# --- Source new modular script files ---
+# These files now contain the functions previously in this script.
+source ./config_management.sh
+source ./disk_operations.sh
+source ./encryption_logic.sh
+source ./zfs_logic.sh
+source ./system_config.sh
+source ./bootloader_logic.sh
+# End of sourcing new files
 
 gather_user_options() {
+    log_debug "Entering function: ${FUNCNAME[0]}"
     show_header "CONFIGURATION"
 
     # ZFS Pool Configuration TUI
@@ -103,8 +111,10 @@ gather_user_options() {
         exit 1
     fi
     CONFIG_VARS[ZFS_TARGET_DISKS]="${zfs_disks[*]}"
+    log_debug "Selected ZFS target disks: ${CONFIG_VARS[ZFS_TARGET_DISKS]}"
 
     if [[ ${#zfs_disks[@]} -gt 1 ]]; then
+        log_debug "Multiple disks selected, prompting for RAID level."
         local raid_options=()
         local num_disks=${#zfs_disks[@]}
         if [[ $num_disks -ge 2 ]]; then raid_options+=("mirror" "RAID-1"); fi
@@ -112,20 +122,102 @@ gather_user_options() {
         if [[ $num_disks -ge 4 ]]; then raid_options+=("raidz2" "RAID-Z2"); fi
 
         local raid_level
-        raid_level=$(dialog --title "ZFS RAID Level" --radiolist "Select ZFS RAID level:" 15 50 ${#raid_options[@]} "${raid_options[@]}" 3>&1 1>&2 2>&3) || exit 1
+        raid_level=$(dialog --title "ZFS RAID Level" --radiolist "Select ZFS RAID level:" 15 50 ${#raid_options[@]} "${raid_options[@]}" 3>&1 1>&2 2>&3) || { log_debug "RAID selection cancelled by user."; exit 1; }
         CONFIG_VARS[ZFS_RAID_LEVEL]="$raid_level"
+        log_debug "Selected ZFS RAID level: ${CONFIG_VARS[ZFS_RAID_LEVEL]}"
     else
         CONFIG_VARS[ZFS_RAID_LEVEL]="single"
+        log_debug "Single disk selected, ZFS RAID level set to: single"
     fi
 
-    # Detached Headers & Clover
-    local main_menu_choice
-    main_menu_choice=$(dialog --title "Advanced Options" --menu "Select advanced security and boot options:" 15 70 2 \
-        1 "Standard on-disk encryption" \
-        2 "Detached Headers (Enhanced Security)" 3>&1 1>&2 2>&3) || exit 1
+    # ZFS Advanced Properties
+    log_debug "Prompting for ZFS ashift..."
+    CONFIG_VARS[ZFS_ASHIFT]=$(dialog --title "ZFS ashift" --default-item "12" --radiolist \
+        "Select ashift value (disk sector size, 12 for 4K disks):" 15 60 3 \
+        "9" "512-byte sectors (legacy)" "off" \
+        "12" "4K sectors (common)" "on" \
+        "13" "8K sectors (less common)" "off" 3>&1 1>&2 2>&3) || { log_debug "ZFS ashift selection cancelled or defaulted."; CONFIG_VARS[ZFS_ASHIFT]="12"; }
+    log_debug "Selected ZFS ashift: ${CONFIG_VARS[ZFS_ASHIFT]}"
 
-    if [[ "$main_menu_choice" == "2" ]]; then
+    log_debug "Prompting for ZFS recordsize..."
+    CONFIG_VARS[ZFS_RECORDSIZE]=$(dialog --title "ZFS recordsize" --default-item "128K" --radiolist \
+        "Select ZFS recordsize (default 128K, larger for sequential workloads):" 15 70 3 \
+        "128K" "Default, good for mixed workloads" "on" \
+        "1M" "Large files, backups, streaming" "off" \
+        "16K" "Databases (consider testing)" "off" 3>&1 1>&2 2>&3) || { log_debug "ZFS recordsize selection cancelled or defaulted."; CONFIG_VARS[ZFS_RECORDSIZE]="128K"; }
+    log_debug "Selected ZFS recordsize: ${CONFIG_VARS[ZFS_RECORDSIZE]}"
+
+    log_debug "Prompting for ZFS compression..."
+    CONFIG_VARS[ZFS_COMPRESSION]=$(dialog --title "ZFS Compression" --default-item "lz4" --radiolist \
+        "Select ZFS compression algorithm:" 15 60 4 \
+        "lz4" "Fast, recommended default" "on" \
+        "gzip" "Good compression, higher CPU" "off" \
+        "zstd" "Modern, good balance" "off" \
+        "off" "No compression" "off" 3>&1 1>&2 2>&3) || { log_debug "ZFS compression selection cancelled or defaulted."; CONFIG_VARS[ZFS_COMPRESSION]="lz4"; }
+    log_debug "Selected ZFS compression: ${CONFIG_VARS[ZFS_COMPRESSION]}"
+
+    # YubiKey LUKS Options
+    # YUBIKEY_DETECTED is exported from preflight_checks.sh
+    if [[ "${YUBIKEY_DETECTED:-false}" == "true" ]]; then
+        log_debug "YubiKey detected, presenting YubiKey LUKS options to user."
+        if (dialog --title "YubiKey LUKS Protection" --yesno "A YubiKey has been detected. Would you like to use it to further secure your LUKS encryption keys? (This will enroll the YubiKey as an additional way to unlock the disks alongside your passphrase)." 10 70); then
+            CONFIG_VARS[USE_YUBIKEY]="yes"
+            log_debug "User opted to use YubiKey for LUKS."
+            dialog --infobox "YubiKey enrollment will occur for each encrypted disk later in the process. Please ensure your YubiKey remains plugged in." 6 70
+            sleep 3 # Give user time to read the infobox
+        else
+            CONFIG_VARS[USE_YUBIKEY]="no"
+            log_debug "User opted not to use YubiKey for LUKS."
+        fi
+    else
+        CONFIG_VARS[USE_YUBIKEY]="no" # Ensure it's set to "no" if no YubiKey detected or if variable not present
+        log_debug "No YubiKey detected or YUBIKEY_DETECTED var not true, USE_YUBIKEY set to 'no'."
+    fi
+
+    # Encryption Mode: Standard or Detached Headers
+    local show_encryption_menu=true
+    CONFIG_VARS[USE_DETACHED_HEADERS]="no" # Default to no
+
+    while [[ "$show_encryption_menu" == true ]]; do
+        local encryption_menu_choice # Renamed from main_menu_choice to avoid conflict if any
+        encryption_menu_choice=$(dialog --title "Encryption Options & LUKS Headers" \
+            --menu "Choose how LUKS headers are stored, or get help:" 18 70 3 \
+            1 "Standard: LUKS headers on data disks" \
+            2 "Detached: LUKS headers on a separate disk (Enhanced Security)" \
+            3 "Help: Explain Detached Header Mode" 3>&1 1>&2 2>&3) || {
+                log_debug "Encryption option selection cancelled by user (ESC or Cancel button).";
+                show_error "Encryption option selection cancelled.";
+                exit 1;
+            }
+
+        case "$encryption_menu_choice" in
+            1)
+                CONFIG_VARS[USE_DETACHED_HEADERS]="no"
+                log_debug "User selected Standard on-disk encryption."
+                show_encryption_menu=false
+                ;;
+            2)
+                CONFIG_VARS[USE_DETACHED_HEADERS]="yes"
+                log_debug "User selected Detached Headers."
+                show_encryption_menu=false # Will proceed to header disk selection after loop
+                ;;
+            3)
+                dialog --title "Explanation: Detached LUKS Headers" --msgbox "Detached LUKS Header Mode provides enhanced security by storing the LUKS encryption headers on a separate, often removable, drive (like a USB stick) instead of on the same disks as your encrypted data.\n\nBenefits:\n- Physical Separation: If your main data disks are stolen or seized, the encryption keys (within the headers) are not present, making decryption much harder.\n- Plausible Deniability (Limited): Without the header disk, the encrypted data disks appear as random noise, which can sometimes aid in situations requiring plausible deniability.\n\nImportant Considerations:\n- Header Disk is CRITICAL: The system WILL NOT BOOT and data CANNOT be decrypted without the correct header disk connected during boot-up.\n- Backup Headers: It is crucial to back up the LUKS headers from this separate disk, as losing or damaging it means losing access to all your encrypted data.\n\nThis option is recommended for users seeking a higher level of data security against physical threats." 22 76
+                log_debug "User viewed Detached Headers explanation."
+                show_encryption_menu=true # Return to the menu
+                ;;
+            *)
+                log_debug "Invalid choice or ESC pressed in encryption menu (choice: $encryption_menu_choice)."
+                show_error "Invalid selection. Exiting." # Should not happen with dialog --menu if not cancelled
+                exit 1 # Or loop back: show_encryption_menu=true
+                ;;
+        esac
+    done
+    log_debug "USE_DETACHED_HEADERS set to: ${CONFIG_VARS[USE_DETACHED_HEADERS]}"
+
+    if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]}" == "yes" ]]; then
         CONFIG_VARS[USE_DETACHED_HEADERS]="yes"
+        log_debug "Detached headers selected. Prompting for header disk."
         local header_disk
         local all_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]}"
         local available_disks=()
@@ -137,14 +229,18 @@ gather_user_options() {
             fi
         done < "$TEMP_DIR/avail_disks"
 
-        header_disk=$(dialog --title "Header Disk" --radiolist "Select a separate USB/drive for LUKS headers:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || exit 1
+        header_disk=$(dialog --title "Header Disk" --radiolist "Select a separate USB/drive for LUKS headers:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || { log_debug "Header disk selection cancelled."; exit 1; }
         CONFIG_VARS[HEADER_DISK]="$header_disk"
+        log_debug "Selected header disk: ${CONFIG_VARS[HEADER_DISK]}"
     else
         CONFIG_VARS[USE_DETACHED_HEADERS]="no"
+        log_debug "Standard on-disk encryption selected."
     fi
 
+    log_debug "Prompting for legacy boot support (Clover)..."
     if (dialog --title "Legacy Boot Support" --yesno "Is a separate bootloader drive (Clover) required for this hardware (e.g., non-bootable NVMe)?" 8 70); then
         CONFIG_VARS[USE_CLOVER]="yes"
+        log_debug "Clover bootloader selected. Prompting for Clover disk."
         local clover_disk
         local all_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]} ${CONFIG_VARS[HEADER_DISK]:-}"
         local available_disks=()
@@ -156,16 +252,20 @@ gather_user_options() {
             fi
         done < "$TEMP_DIR/avail_disks"
 
-        clover_disk=$(dialog --title "Clover Drive" --radiolist "Select a separate drive for the Clover bootloader:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || exit 1
+        clover_disk=$(dialog --title "Clover Drive" --radiolist "Select a separate drive for the Clover bootloader:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || { log_debug "Clover disk selection cancelled."; exit 1; }
         CONFIG_VARS[CLOVER_DISK]="$clover_disk"
+        log_debug "Selected Clover disk: ${CONFIG_VARS[CLOVER_DISK]}"
     else
         CONFIG_VARS[USE_CLOVER]="no"
+        log_debug "Clover bootloader not selected."
     fi
 
     # Network Configuration
+    log_debug "Gathering network configuration..."
     show_progress "Gathering network configuration..."
 
     # Get network interfaces
+    log_debug "Detecting network interfaces..."
     local ifaces
     ifaces=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo | head -5)
     local iface_array=()
@@ -184,13 +284,17 @@ gather_user_options() {
 
     CONFIG_VARS[NET_IFACE]=$(dialog --title "Network Interface" \
         --radiolist "Select primary network interface:" 15 70 ${#iface_options[@]} \
-        "${iface_options[@]}" 3>&1 1>&2 2>&3) || exit 1
+        "${iface_options[@]}" 3>&1 1>&2 2>&3) || { log_debug "Network interface selection cancelled."; exit 1; }
+    log_debug "Selected network interface: ${CONFIG_VARS[NET_IFACE]}"
 
     # DHCP or Static
+    log_debug "Prompting for DHCP or static IP configuration..."
     if dialog --title "Network Configuration" --yesno "Use DHCP for network configuration?" 8 60; then
         CONFIG_VARS[NET_USE_DHCP]="yes"
+        log_debug "Network configuration set to DHCP."
     else
         CONFIG_VARS[NET_USE_DHCP]="no"
+        log_debug "Network configuration set to Static. Gathering details."
 
         # Get current IP as suggestion
         local current_ip
@@ -199,10 +303,12 @@ gather_user_options() {
 
         CONFIG_VARS[NET_IP_CIDR]=$(dialog --title "Static IP Configuration" \
             --inputbox "Enter IP address with CIDR notation (e.g., 192.168.1.100/24):" 10 60 \
-            "$current_ip" 3>&1 1>&2 2>&3) || exit 1
+            "$current_ip" 3>&1 1>&2 2>&3) || { log_debug "Static IP input cancelled."; exit 1; }
+        log_debug "Entered static IP/CIDR: ${CONFIG_VARS[NET_IP_CIDR]}"
 
         # Validate IP format
         if ! echo "${CONFIG_VARS[NET_IP_CIDR]}" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$'; then
+            log_debug "Invalid IP/CIDR format: ${CONFIG_VARS[NET_IP_CIDR]}"
             show_error "Invalid IP/CIDR format: ${CONFIG_VARS[NET_IP_CIDR]}"
             exit 1
         fi
@@ -214,45 +320,63 @@ gather_user_options() {
 
         CONFIG_VARS[NET_GATEWAY]=$(dialog --title "Gateway Configuration" \
             --inputbox "Enter gateway IP address:" 10 60 \
-            "$current_gw" 3>&1 1>&2 2>&3) || exit 1
+            "$current_gw" 3>&1 1>&2 2>&3) || { log_debug "Gateway input cancelled."; exit 1; }
+        log_debug "Entered gateway IP: ${CONFIG_VARS[NET_GATEWAY]}"
 
         # Validate gateway format
         if ! echo "${CONFIG_VARS[NET_GATEWAY]}" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+            log_debug "Invalid gateway IP format: ${CONFIG_VARS[NET_GATEWAY]}"
             show_error "Invalid gateway IP format: ${CONFIG_VARS[NET_GATEWAY]}"
             exit 1
         fi
 
         # Optional: DNS servers
+        log_debug "Prompting for DNS servers..."
         local current_dns
         current_dns=$(grep nameserver /etc/resolv.conf | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')
         [[ -z "$current_dns" ]] && current_dns="8.8.8.8 8.8.4.4"
 
         CONFIG_VARS[NET_DNS]=$(dialog --title "DNS Configuration (Optional)" \
             --inputbox "Enter DNS servers (space-separated):" 10 60 \
-            "$current_dns" 3>&1 1>&2 2>&3) || CONFIG_VARS[NET_DNS]="8.8.8.8 8.8.4.4"
+            "$current_dns" 3>&1 1>&2 2>&3) || { log_debug "DNS input defaulted or cancelled."; CONFIG_VARS[NET_DNS]="8.8.8.8 8.8.4.4"; }
+        log_debug "Entered DNS servers: ${CONFIG_VARS[NET_DNS]}"
     fi
 
     # Hostname
+    log_debug "Prompting for hostname..."
     local suggested_hostname="proxmox"
     [[ -n "${HOSTNAME}" && "${HOSTNAME}" != "localhost" ]] && suggested_hostname="${HOSTNAME}"
 
     CONFIG_VARS[HOSTNAME]=$(dialog --title "System Hostname" \
         --inputbox "Enter hostname for this Proxmox system:" 10 60 \
-        "$suggested_hostname" 3>&1 1>&2 2>&3) || CONFIG_VARS[HOSTNAME]="proxmox"
+        "$suggested_hostname" 3>&1 1>&2 2>&3) || { log_debug "Hostname input defaulted or cancelled."; CONFIG_VARS[HOSTNAME]="proxmox"; }
+    log_debug "Entered hostname: ${CONFIG_VARS[HOSTNAME]}"
 
     # Validate hostname
     if ! echo "${CONFIG_VARS[HOSTNAME]}" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'; then
+        log_debug "Invalid hostname format: ${CONFIG_VARS[HOSTNAME]}"
         show_error "Invalid hostname format: ${CONFIG_VARS[HOSTNAME]}"
         exit 1
     fi
 
     CONFIG_VARS[ZFS_POOL_NAME]="rpool"
+    log_debug "Default ZFS_POOL_NAME set to: ${CONFIG_VARS[ZFS_POOL_NAME]}"
     CONFIG_VARS[LUKS_MAPPER_NAME]="luks_root"
+    log_debug "Default LUKS_MAPPER_NAME set to: ${CONFIG_VARS[LUKS_MAPPER_NAME]}"
 
     # Display configuration summary
+    log_debug "Displaying configuration summary."
     local summary="Configuration Summary:\n\n"
     summary+="ZFS Disks: ${CONFIG_VARS[ZFS_TARGET_DISKS]}\n"
     summary+="RAID Level: ${CONFIG_VARS[ZFS_RAID_LEVEL]}\n"
+    summary+="ZFS ashift: ${CONFIG_VARS[ZFS_ASHIFT]}\n"
+    summary+="ZFS recordsize: ${CONFIG_VARS[ZFS_RECORDSIZE]}\n"
+    summary+="ZFS compression: ${CONFIG_VARS[ZFS_COMPRESSION]}\n"
+
+    if [[ "${CONFIG_VARS[USE_YUBIKEY]:-no}" == "yes" ]]; then
+        summary+="YubiKey Protection: Enabled\n"
+    fi
+
     summary+="Hostname: ${CONFIG_VARS[HOSTNAME]}\n"
     summary+="Network Interface: ${CONFIG_VARS[NET_IFACE]}\n"
 
@@ -276,723 +400,45 @@ gather_user_options() {
     dialog --title "Configuration Summary" --msgbox "$summary" 20 70
 
     # Save Config
+    log_debug "Prompting to save configuration..."
     if (dialog --title "Save Configuration" --yesno "Save this configuration for future non-interactive installations?" 8 70); then
-        save_config "$(dirname "$0")/proxmox_install_$(date +%F_%H%M%S).conf"
+        local conf_file_name="proxmox_install_$(date +%F_%H%M%S).conf"
+        log_debug "User chose to save configuration to $conf_file_name."
+        # SCRIPT_DIR is not available here, need to use relative path or pass it.
+        # Assuming installer.sh and core_logic.sh are in the same directory.
+        save_config "./$conf_file_name" # Save in the script's current directory
+    else
+        log_debug "User chose not to save configuration."
     fi
-}
-
-partition_and_format_disks() {
-    show_step "PARTITION" "Partitioning & Formatting Disks"
-
-    local target_disks_arr=()
-    read -r -a target_disks_arr <<< "${CONFIG_VARS[ZFS_TARGET_DISKS]}"
-
-    # Safety check - ensure we're not wiping the installer device
-    for disk in "${target_disks_arr[@]}"; do
-        if [[ "$disk" == "$INSTALLER_DEVICE" ]]; then
-            show_error "Cannot use installer device ($INSTALLER_DEVICE) as target!"
-            show_error "This would destroy the running installer."
-            exit 1
-        fi
-
-        # Additional safety check for mounted devices
-        if grep -q "^$disk" /proc/mounts; then
-            show_error "Disk $disk is currently mounted!"
-            show_error "Please unmount all partitions on this disk before proceeding."
-            exit 1
-        fi
-    done
-
-    # Safety check for header disk
-    if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]:-}" == "yes" ]]; then
-        if [[ "${CONFIG_VARS[HEADER_DISK]}" == "$INSTALLER_DEVICE" ]]; then
-            show_error "Cannot use installer device as header disk!"
-            exit 1
-        fi
-    fi
-
-    # Safety check for Clover disk
-    if [[ "${CONFIG_VARS[USE_CLOVER]:-}" == "yes" ]]; then
-        if [[ "${CONFIG_VARS[CLOVER_DISK]}" == "$INSTALLER_DEVICE" ]]; then
-            show_error "Cannot use installer device as Clover disk!"
-            exit 1
-        fi
-    fi
-
-    # Confirm disk wiping
-    local disk_list
-    disk_list=$(printf '%s\n' "${target_disks_arr[@]}")
-    [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]:-}" == "yes" ]] && disk_list+="\n${CONFIG_VARS[HEADER_DISK]}"
-    [[ "${CONFIG_VARS[USE_CLOVER]:-}" == "yes" ]] && disk_list+="\n${CONFIG_VARS[CLOVER_DISK]}"
-
-    if ! dialog --title "⚠️  DESTRUCTIVE OPERATION WARNING ⚠️" \
-        --yesno "The following disks will be COMPLETELY ERASED:\n\n$disk_list\n\nALL DATA WILL BE LOST!\n\nAre you absolutely sure?" 16 60; then
-        show_error "Installation cancelled by user."
-        exit 1
-    fi
-
-    # Continue with original partitioning logic
-    for disk in "${target_disks_arr[@]}"; do
-        show_progress "Wiping target disk: $disk..."
-        wipefs -a "$disk" &>/dev/null || true
-        sgdisk --zap-all "$disk" &>/dev/null || true
-    done
-
-    if [[ "${CONFIG_VARS[USE_CLOVER]:-}" == "yes" ]]; then
-        show_progress "Wiping Clover disk: ${CONFIG_VARS[CLOVER_DISK]}..."
-        wipefs -a "${CONFIG_VARS[CLOVER_DISK]}" &>/dev/null || true
-        sgdisk --zap-all "${CONFIG_VARS[CLOVER_DISK]}" &>/dev/null || true
-    fi
-
-    if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]:-}" == "yes" ]]; then
-        local header_disk="${CONFIG_VARS[HEADER_DISK]}"
-        show_progress "Wiping header disk: $header_disk..."
-        wipefs -a "$header_disk" &>/dev/null || true
-        sgdisk --zap-all "$header_disk" &>/dev/null || true
-
-        sgdisk -n 1:0:0 -t 1:8300 -c 1:LUKS-Headers "$header_disk"
-        partprobe
-        sleep 2
-
-        local p_prefix=""
-        [[ "$header_disk" == /dev/nvme* ]] && p_prefix="p"
-        CONFIG_VARS[HEADER_PART]="${header_disk}${p_prefix}1"
-        mkfs.ext4 -L "LUKS_HEADERS" "${CONFIG_VARS[HEADER_PART]}"
-        CONFIG_VARS[HEADER_PART_UUID]=$(blkid -s UUID -o value "${CONFIG_VARS[HEADER_PART]}" 2>/dev/null)
-        if [[ -z "${CONFIG_VARS[HEADER_PART_UUID]}" ]]; then
-            show_error "CRITICAL: Failed to retrieve UUID for header partition ${CONFIG_VARS[HEADER_PART]}."
-            show_error "This UUID is essential for the system to locate detached LUKS headers at boot."
-            show_error "Please check the device and ensure it's correctly partitioned and formatted."
-            exit 1
-        fi
-        show_progress "Header partition ${CONFIG_VARS[HEADER_PART]} has UUID: ${CONFIG_VARS[HEADER_PART_UUID]}"
-        show_success "Header disk prepared."
-    fi
-
-    partprobe
-    sleep 3
-
-    local primary_target=${target_disks_arr[0]}
-    show_progress "Partitioning primary target disk: $primary_target"
-    sgdisk -n 1:1M:+512M -t 1:EF00 -c 1:EFI "$primary_target"
-    sgdisk -n 2:0:+1G -t 2:8300 -c 2:Boot "$primary_target"
-    sgdisk -n 3:0:0 -t 3:BF01 -c 3:LUKS-ZFS "$primary_target"
-
-    for i in $(seq 1 $((${#target_disks_arr[@]}-1))); do
-        local disk=${target_disks_arr[$i]}
-        show_progress "Creating ZFS data partition on $disk"
-        sgdisk -n 1:0:0 -t 1:BF01 -c 1:LUKS-ZFS "$disk"
-    done
-
-    if [[ "${CONFIG_VARS[USE_CLOVER]:-}" == "yes" ]]; then
-        show_progress "Partitioning Clover disk: ${CONFIG_VARS[CLOVER_DISK]}"
-        sgdisk -n 1:1M:0 -t 1:EF00 -c 1:Clover-EFI "${CONFIG_VARS[CLOVER_DISK]}"
-        local p_prefix=""
-        [[ "${CONFIG_VARS[CLOVER_DISK]}" == /dev/nvme* ]] && p_prefix="p"
-        CONFIG_VARS[CLOVER_EFI_PART]="${CONFIG_VARS[CLOVER_DISK]}${p_prefix}1"
-    fi
-
-    partprobe
-    sleep 3
-
-    local p_prefix=""
-    [[ "$primary_target" == /dev/nvme* ]] && p_prefix="p"
-    CONFIG_VARS[EFI_PART]="${primary_target}${p_prefix}1"
-    CONFIG_VARS[BOOT_PART]="${primary_target}${p_prefix}2"
-
-    mkfs.vfat -F32 "${CONFIG_VARS[EFI_PART]}"
-    mkfs.ext4 -F "${CONFIG_VARS[BOOT_PART]}"
-
-    local luks_partitions=()
-    for disk in "${target_disks_arr[@]}"; do
-        p_prefix=""
-        [[ "$disk" == /dev/nvme* ]] && p_prefix="p"
-        if [[ "$disk" == "$primary_target" ]]; then
-            luks_partitions+=("${disk}${p_prefix}3")
-        else
-            luks_partitions+=("${disk}${p_prefix}1")
-        fi
-    done
-
-    CONFIG_VARS[LUKS_PARTITIONS]="${luks_partitions[*]}"
-    show_success "All disks partitioned successfully."
-}
-
-setup_luks_encryption() {
-    show_step "ENCRYPT" "Setting up LUKS Encryption"
-
-    local luks_partitions_arr=()
-    read -r -a luks_partitions_arr <<< "${CONFIG_VARS[LUKS_PARTITIONS]}"
-    local luks_mappers=()
-
-    local pass
-    pass=$(dialog --title "LUKS Passphrase" --passwordbox "Enter new LUKS passphrase for all disks:" 10 60 3>&1 1>&2 2>&3) || exit 1
-
-    local pass_confirm
-    pass_confirm=$(dialog --title "LUKS Passphrase" --passwordbox "Confirm passphrase:" 10 60 3>&1 1>&2 2>&3) || exit 1
-
-    if [[ "$pass" != "$pass_confirm" ]] || [[ -z "$pass" ]]; then
-        show_error "Passphrases do not match or are empty."
-        exit 1
-    fi
-
-    local header_mount=""
-    local header_files_str=""
-
-    if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]:-}" == "yes" ]]; then
-        header_mount="$TEMP_DIR/headers"
-        mkdir -p "$header_mount"
-        mount "${CONFIG_VARS[HEADER_PART]}" "$header_mount"
-    fi
-
-    for i in "${!luks_partitions_arr[@]}"; do
-        local part="${luks_partitions_arr[$i]}"
-        local mapper_name="${CONFIG_VARS[LUKS_MAPPER_NAME]}_$i"
-
-        if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]:-}" == "yes" ]]; then
-            local header_filename="header_${CONFIG_VARS[HOSTNAME]}_disk${i}.img"
-            local header_file_fullpath="$header_mount/$header_filename"
-
-            show_progress "Creating detached LUKS header for $part (header file: $header_filename on ${CONFIG_VARS[HEADER_PART]})..."
-            echo -n "$pass" | cryptsetup luksFormat --type luks2 --header "$header_file_fullpath" "$part" -
-
-            show_progress "Opening LUKS volume $part using detached header $header_filename..."
-            echo -n "$pass" | cryptsetup open --header "$header_file_fullpath" "$part" "$mapper_name" -
-
-            header_files_str+="$header_filename "
-        else
-            show_progress "Formatting LUKS on $part..."
-            echo -n "$pass" | cryptsetup luksFormat --type luks2 "$part" -
-
-            show_progress "Opening LUKS volume $part..."
-            echo -n "$pass" | cryptsetup open "$part" "$mapper_name" -
-        fi
-
-        luks_mappers+=("/dev/mapper/$mapper_name")
-    done
-
-    if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]:-}" == "yes" ]]; then
-        CONFIG_VARS[HEADER_FILENAMES_ON_PART]="${header_files_str% }"
-        umount "$header_mount"
-        show_success "Detached headers created on ${CONFIG_VARS[HEADER_DISK]}."
-    fi
-
-    CONFIG_VARS[LUKS_MAPPERS]="${luks_mappers[*]}"
-    show_success "All LUKS volumes created and opened."
-}
-
-setup_zfs_pool() {
-    show_step "ZFS" "Creating ZFS Pool"
-
-    local pool_name="${CONFIG_VARS[ZFS_POOL_NAME]}"
-    local raid_level="${CONFIG_VARS[ZFS_RAID_LEVEL]}"
-    local luks_devices=()
-    read -r -a luks_devices <<< "${CONFIG_VARS[LUKS_MAPPERS]}"
-
-    if zpool list -H "$pool_name" &>/dev/null; then
-        show_warning "Pool $pool_name already exists. Destroying..."
-        zpool destroy -f "$pool_name"
-    fi
-
-    local zpool_cmd="zpool create -f -o ashift=12 -O acltype=posixacl -O compression=lz4"
-    zpool_cmd+=" -O dnodesize=auto -O normalization=formD -O relatime=on"
-    zpool_cmd+=" -O xattr=sa -O mountpoint=/ -R /mnt"
-    zpool_cmd+=" $pool_name"
-
-    case "$raid_level" in
-        "single")
-            zpool_cmd+=" ${luks_devices[0]}"
-            ;;
-        "mirror")
-            zpool_cmd+=" mirror ${luks_devices[*]}"
-            ;;
-        "raidz1")
-            zpool_cmd+=" raidz1 ${luks_devices[*]}"
-            ;;
-        "raidz2")
-            zpool_cmd+=" raidz2 ${luks_devices[*]}"
-            ;;
-        *)
-            show_error "Unknown RAID level: $raid_level"
-            exit 1
-            ;;
-    esac
-
-    show_progress "Creating ZFS pool with $raid_level configuration..."
-    eval "$zpool_cmd" || {
-        show_error "Failed to create ZFS pool"
-        exit 1
-    }
-
-    show_progress "Creating ZFS datasets..."
-    zfs create -o mountpoint=none "$pool_name/ROOT"
-    zfs create -o mountpoint=/ "$pool_name/ROOT/pve-1"
-    zfs create -o mountpoint=/var/lib/vz "$pool_name/data"
-
-    zpool set bootfs="$pool_name/ROOT/pve-1" "$pool_name"
-
-    show_success "ZFS pool created successfully"
-}
-
-install_base_system() {
-    show_step "DEBIAN" "Installing Base System"
-
-    show_progress "Mounting boot partitions..."
-    mkdir -p /mnt/boot
-    if ! mount "${CONFIG_VARS[BOOT_PART]}" /mnt/boot; then
-        show_error "Failed to mount boot partition ${CONFIG_VARS[BOOT_PART]} on /mnt/boot"
-        exit 1
-    fi
-    mkdir -p /mnt/boot/efi
-    if ! mount "${CONFIG_VARS[EFI_PART]}" /mnt/boot/efi; then
-        show_error "Failed to mount EFI partition ${CONFIG_VARS[EFI_PART]} on /mnt/boot/efi"
-        exit 1
-    fi
-
-    show_progress "Installing Debian base system (this will take several minutes)..."
-    local debian_release="bookworm"
-    local debian_mirror="http://deb.debian.org/debian"
-
-    # Log debootstrap output for debugging
-    local debootstrap_log="$LOG_FILE.debootstrap"
-    echo "Debootstrap log:" > "$debootstrap_log"
-
-    if ! debootstrap --arch=amd64 --include=locales,vim,openssh-server,wget,curl \
-        "$debian_release" /mnt "$debian_mirror" >> "$debootstrap_log" 2>&1; then
-        show_error "Debootstrap failed. Base system installation could not complete."
-        show_error "Check $debootstrap_log in the installation environment for details."
-        # LOG_FILE (and thus debootstrap_log) is in TEMP_DIR which should persist until cleanup
-        # or be accessible if script exits prematurely.
-        exit 1
-    fi
-    show_success "Base system installed (debootstrap successful)."
-
-    cp "$LOG_FILE" /mnt/var/log/proxmox-install.log
-    # Also copy the debootstrap log if it was created
-    if [ -f "$debootstrap_log" ]; then
-        cp "$debootstrap_log" /mnt/var/log/
-    fi
-}
-
-configure_new_system() {
-    show_step "CHROOT" "Configuring System"
-
-    show_progress "Preparing chroot environment..."
-    cp /etc/resolv.conf /mnt/etc/
-    if ! mount -t proc /proc /mnt/proc; then
-        show_error "Failed to mount /proc into chroot environment at /mnt/proc"
-        exit 1
-    fi
-    if ! mount -t sysfs /sys /mnt/sys; then
-        show_error "Failed to mount /sys into chroot environment at /mnt/sys"
-        exit 1
-    fi
-    if ! mount -t devtmpfs /dev /mnt/dev; then
-        show_error "Failed to mount /dev into chroot environment at /mnt/dev"
-        exit 1
-    fi
-    if ! mount -t devpts /dev/pts /mnt/dev/pts; then
-        show_error "Failed to mount /dev/pts into chroot environment at /mnt/dev/pts"
-        exit 1
-    fi
-
-    local root_pass
-    root_pass=$(dialog --title "Root Password" --passwordbox "Enter root password for new system:" 10 60 3>&1 1>&2 2>&3) || exit 1
-    local root_pass_confirm
-    root_pass_confirm=$(dialog --title "Root Password" --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3) || exit 1
-
-    if [[ "$root_pass" != "$root_pass_confirm" ]] || [[ -z "$root_pass" ]]; then
-        show_error "Passwords do not match or are empty."
-        exit 1
-    fi
-
-    cat > /mnt/tmp/configure.sh <<- 'CHROOT_SCRIPT'
-        #!/bin/bash
-        set -e
-
-        echo "${HOSTNAME}" > /etc/hostname
-        cat > /etc/hosts << EOF
-127.0.0.1       localhost
-127.0.1.1       ${HOSTNAME}.localdomain ${HOSTNAME}
-
-# IPv6
-::1             localhost ip6-localhost ip6-loopback
-ff02::1         ip6-allnodes
-ff02::2         ip6-allrouters
-EOF
-
-        echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
-        locale-gen
-        echo "LANG=en_US.UTF-8" > /etc/locale.conf
-
-        ln -sf /usr/share/zoneinfo/UTC /etc/localtime
-
-        cat > /etc/apt/sources.list << EOF
-deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
-
-deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-deb-src http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-
-deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
-EOF
-
-        wget -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg \
-            http://download.proxmox.com/debian/proxmox-release-bookworm.gpg
-
-        echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > \
-            /etc/apt/sources.list.d/pve-no-subscription.list
-
-        apt-get update
-
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            linux-image-amd64 linux-headers-amd64 \
-            zfs-initramfs cryptsetup-initramfs \
-            grub-efi-amd64 efibootmgr \
-            bridge-utils ifupdown2
-
-        if [[ "${NET_USE_DHCP}" == "yes" ]]; then
-            cat > /etc/network/interfaces << EOF
-auto lo
-iface lo inet loopback
-
-auto ${NET_IFACE}
-iface ${NET_IFACE} inet dhcp
-
-auto vmbr0
-iface vmbr0 inet dhcp
-    bridge-ports ${NET_IFACE}
-    bridge-stp off
-    bridge-fd 0
-EOF
-        else
-            if [[ -L "/etc/resolv.conf" ]]; then
-                echo "Warning: /etc/resolv.conf is a symlink. Attempting to write DNS configuration." >&2
-                if ! echo "nameserver ${NET_DNS// /$'\n'nameserver }" > /etc/resolv.conf; then
-                    echo "Error: Failed to write to /etc/resolv.conf (symlink target likely not writable)." >&2
-                fi
-            elif [[ ! -w "/etc/resolv.conf" ]]; then
-                echo "Error: /etc/resolv.conf is not writable. Cannot configure DNS automatically." >&2
-            else
-                echo "nameserver ${NET_DNS// /$'\n'nameserver }" > /etc/resolv.conf
-            fi
-
-            cat > /etc/network/interfaces << EOF
-auto lo
-iface lo inet loopback
-
-auto ${NET_IFACE}
-iface ${NET_IFACE} inet manual
-
-auto vmbr0
-iface vmbr0 inet static
-    address ${NET_IP_CIDR}
-    gateway ${NET_GATEWAY}
-    bridge-ports ${NET_IFACE}
-    bridge-stp off
-    bridge-fd 0
-EOF
-        fi
-
-        if [[ "${USE_DETACHED_HEADERS}" == "yes" ]]; then
-            echo "# Detached header configuration" > /etc/crypttab
-            local header_files_arr=()
-            read -r -a header_files_arr <<< "${HEADER_FILENAMES_ON_PART}"
-            local luks_parts_arr=()
-            read -r -a luks_parts_arr <<< "${LUKS_PARTITIONS}"
-            for i in "${!luks_parts_arr[@]}"; do
-                local uuid
-                uuid=$(blkid -s UUID -o value "${luks_parts_arr[$i]}")
-                if [[ -z "${HEADER_PART_UUID}" ]]; then
-                    echo "Critical error: HEADER_PART_UUID is not set in chroot for detached headers." >&2
-                    exit 1
-                fi
-                echo "${LUKS_MAPPER_NAME}_$i UUID=$uuid none luks,header=UUID=${HEADER_PART_UUID}:${header_files_arr[$i]},discard" >> /etc/crypttab
-            done
-        else
-            echo "# Standard LUKS configuration" > /etc/crypttab
-            local luks_parts_arr=()
-            read -r -a luks_parts_arr <<< "${LUKS_PARTITIONS}"
-            for i in "${!luks_parts_arr[@]}"; do
-                local uuid
-                uuid=$(blkid -s UUID -o value "${luks_parts_arr[$i]}")
-                echo "${LUKS_MAPPER_NAME}_$i UUID=$uuid none luks,discard" >> /etc/crypttab
-            done
-        fi
-
-        echo "# /etc/fstab: static file system information." > /etc/fstab
-        local boot_uuid
-        boot_uuid=$(blkid -s UUID -o value "${BOOT_PART}")
-        echo "UUID=$boot_uuid /boot ext4 defaults 0 2" >> /etc/fstab
-        local efi_uuid
-        efi_uuid=$(blkid -s UUID -o value "${EFI_PART}")
-        echo "UUID=$efi_uuid /boot/efi vfat umask=0077 0 1" >> /etc/fstab
-
-        update-initramfs -c -k all
-
-        grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=proxmox
-        update-grub
-
-        echo "root:${ROOT_PASSWORD}" | chpasswd
-
-        DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi
-
-        rm -f /etc/apt/sources.list.d/pve-enterprise.list
-
-        systemctl enable ssh
-
-        apt-get clean
-
-CHROOT_SCRIPT
-
-    chmod +x /mnt/tmp/configure.sh
-
-    export HOSTNAME="${CONFIG_VARS[HOSTNAME]}"
-    export NET_USE_DHCP="${CONFIG_VARS[NET_USE_DHCP]:-no}"
-    export NET_IFACE="${CONFIG_VARS[NET_IFACE]:-ens18}"
-    export NET_IP_CIDR="${CONFIG_VARS[NET_IP_CIDR]:-}"
-    export NET_GATEWAY="${CONFIG_VARS[NET_GATEWAY]:-}"
-    export NET_DNS="${CONFIG_VARS[NET_DNS]:-8.8.8.8 8.8.4.4}"
-    export USE_DETACHED_HEADERS="${CONFIG_VARS[USE_DETACHED_HEADERS]}"
-    export HEADER_PART_UUID="${CONFIG_VARS[HEADER_PART_UUID]:-}"
-    export HEADER_FILENAMES_ON_PART="${CONFIG_VARS[HEADER_FILENAMES_ON_PART]:-}"
-    export LUKS_PARTITIONS="${CONFIG_VARS[LUKS_PARTITIONS]}"
-    export LUKS_MAPPER_NAME="${CONFIG_VARS[LUKS_MAPPER_NAME]}"
-    export BOOT_PART="${CONFIG_VARS[BOOT_PART]}"
-    export EFI_PART="${CONFIG_VARS[EFI_PART]}"
-    export ROOT_PASSWORD="$root_pass"
-
-    show_progress "Configuring system in chroot (this will take several minutes)..."
-    if ! chroot /mnt /tmp/configure.sh; then
-        show_error "System configuration script (/tmp/configure.sh) failed within the chroot environment."
-        show_error "Logs within the chroot (if any) might be in /mnt/var/log or /mnt/tmp."
-        # Additional debug info can be added here if needed, e.g., tail of chroot script log
-        exit 1
-    fi
-
-    if [[ -d "$(dirname "$0")/debs" ]] && ls "$(dirname "$0")/debs"/*.deb &>/dev/null; then
-        show_progress "Installing local .deb packages..."
-        cp -r "$(dirname "$0")/debs" /mnt/tmp/
-        chroot /mnt bash -c "dpkg -i /tmp/debs/*.deb || apt-get -f install -y"
-        rm -rf /mnt/tmp/debs
-    fi
-
-    rm /mnt/tmp/configure.sh
-
-    umount -lf /mnt/dev/pts || true
-    umount -lf /mnt/dev || true
-    umount -lf /mnt/sys || true
-    umount -lf /mnt/proc || true
-
-    show_success "System configuration complete"
-}
-
-install_clover_bootloader() {
-    show_step "CLOVER" "Installing Clover Bootloader"
-
-    local clover_efi="${CONFIG_VARS[CLOVER_EFI_PART]}"
-
-    show_progress "Formatting Clover EFI partition..."
-    mkfs.vfat -F32 "$clover_efi"
-
-    local clover_mount="$TEMP_DIR/clover"
-    mkdir -p "$clover_mount"
-    if ! mount "$clover_efi" "$clover_mount"; then
-        show_error "Failed to mount Clover EFI partition $clover_efi on $clover_mount"
-        exit 1
-    fi
-
-    show_progress "Downloading Clover bootloader..."
-    local clover_url="https://github.com/CloverHackyColor/CloverBootloader/releases/download/5157/CloverV2-5157.zip"
-    wget -q --show-progress -O "$TEMP_DIR/clover.zip" "$clover_url" || {
-        show_error "Failed to download Clover"
-        exit 1
-    }
-
-    show_progress "Installing Clover..."
-    cd "$TEMP_DIR"
-    7z x -y clover.zip > /dev/null
-
-    mkdir -p "$clover_mount/EFI"
-    cp -r CloverV2/EFI/* "$clover_mount/EFI/"
-
-    cat > "$clover_mount/EFI/CLOVER/config.plist" <<- 'CLOVER_CONFIG'
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Boot</key>
-            <dict>
-                <key>Timeout</key>
-                <integer>5</integer>
-                <key>DefaultVolume</key>
-                <string>Proxmox</string>
-                <key>DefaultLoader</key>
-                <string>\EFI\proxmox\grubx64.efi</string>
-            </dict>
-            <key>GUI</key>
-            <dict>
-                <key>Theme</key>
-                <string>embedded</string>
-                <key>ShowOptimus</key>
-                <false/>
-            </dict>
-            <key>Scan</key>
-            <dict>
-                <key>Entries</key>
-                <true/>
-                <key>Legacy</key>
-                <false/>
-                <key>Linux</key>
-                <true/>
-                <key>Tool</key>
-                <true/>
-            </dict>
-        </dict>
-        </plist>
-CLOVER_CONFIG
-
-    mkdir -p "$clover_mount/EFI/CLOVER/ACPI/origin"
-
-    show_progress "Creating UEFI boot entry..."
-    efibootmgr -c -d "${CONFIG_VARS[CLOVER_DISK]}" -p 1 -L "Clover" -l '\EFI\CLOVER\CLOVERX64.efi' || true
-
-    cd /
-    umount "$clover_mount"
-
-    show_success "Clover bootloader installed"
-}
-
-backup_luks_header() {
-    show_step "BACKUP" "Backing Up LUKS Headers"
-
-    if ! dialog --title "LUKS Header Backup" \
-        --yesno "Would you like to backup LUKS headers to a removable device?" 8 60; then
-        show_warning "Skipping LUKS header backup"
-        return
-    fi
-
-    local removable_devs=()
-    echo "" > "$TEMP_DIR/removable_devs_list"
-    for dev_path in /sys/block/*; do
-      local dev_name
-      dev_name=$(basename "$dev_path")
-      if [[ $dev_name == sd* || $dev_name == nvme* ]]; then
-        echo "$dev_name" >> "$TEMP_DIR/removable_devs_list"
-      fi
-    done
-    while read -r dev; do
-        if [[ -e "/sys/block/$dev/removable" ]] && [[ "$(cat "/sys/block/$dev/removable")" == "1" ]]; then
-            local size
-            size=$(lsblk -dno SIZE "/dev/$dev" 2>/dev/null || echo "Unknown")
-            removable_devs+=("/dev/$dev" "$dev ($size)")
-        fi
-    done < "$TEMP_DIR/removable_devs_list"
-
-    if [[ ${#removable_devs[@]} -eq 0 ]]; then
-        show_warning "No removable devices found"
-        return
-    fi
-
-    local backup_dev
-    backup_dev=$(dialog --title "Backup Device" \
-        --radiolist "Select removable device for LUKS header backup:" 15 60 \
-        ${#removable_devs[@]} "${removable_devs[@]}" 3>&1 1>&2 2>&3) || return
-
-    show_progress "Preparing backup device..."
-    wipefs -a "$backup_dev" &>/dev/null || true
-
-    echo -e "o\nn\np\n1\n\n\nw" | fdisk "$backup_dev" &>/dev/null
-    sleep 2
-    partprobe
-
-    local backup_part="${backup_dev}1"
-    [[ "$backup_dev" == /dev/nvme* ]] && backup_part="${backup_dev}p1"
-
-    mkfs.ext4 -L "LUKS_BACKUP" "$backup_part" &>/dev/null
-
-    local backup_mount="$TEMP_DIR/backup"
-    mkdir -p "$backup_mount"
-    if ! mount "$backup_part" "$backup_mount"; then
-        show_error "Failed to mount LUKS header backup partition $backup_part on $backup_mount. Skipping backup."
-        rmdir "$backup_mount" 2>/dev/null
-        return 1
-    fi
-
-    mkdir -p "$backup_mount/luks_headers_${CONFIG_VARS[HOSTNAME]}"
-    local luks_parts=()
-    read -r -a luks_parts <<< "${CONFIG_VARS[LUKS_PARTITIONS]}"
-
-    for i in "${!luks_parts[@]}"; do
-        local part="${luks_parts[$i]}"
-        local backup_file="$backup_mount/luks_headers_${CONFIG_VARS[HOSTNAME]}/header_disk${i}.img"
-
-        show_progress "Backing up header from $part..."
-
-        if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]:-}" == "yes" ]]; then
-            local header_files=()
-            read -r -a header_files <<< "${CONFIG_VARS[HEADER_FILENAMES_ON_PART]}"
-            local header_disk_mount_point="$TEMP_DIR/header_mount_for_backup"
-            mkdir -p "$header_disk_mount_point"
-            mount "${CONFIG_VARS[HEADER_PART]}" "$header_disk_mount_point"
-            cp "$header_disk_mount_point/${header_files[$i]}" "$backup_file"
-            umount "$header_disk_mount_point"
-        else
-            cryptsetup luksHeaderBackup "$part" --header-backup-file "$backup_file"
-        fi
-    done
-
-    cat > "$backup_mount/luks_headers_${CONFIG_VARS[HOSTNAME]}/README.txt" <<- EOF
-        LUKS Header Backup Recovery Instructions
-        ========================================
-
-        Hostname: ${CONFIG_VARS[HOSTNAME]}
-        Date: $(date)
-        Encryption Type: ${CONFIG_VARS[USE_DETACHED_HEADERS]:-no}
-
-        To restore headers:
-        1. Boot from a Linux live USB
-        2. Mount this backup device
-        3. Run: cryptsetup luksHeaderRestore /dev/sdXn --header-backup-file header_diskN.img
-
-        Disk mapping:
-EOF
-
-    for i in "${!luks_parts[@]}"; do
-        echo "header_disk${i}.img -> ${luks_parts[$i]}" >> \
-            "$backup_mount/luks_headers_${CONFIG_VARS[HOSTNAME]}/README.txt"
-    done
-
-    # Find the saved config file and copy it
-    local config_file_to_backup
-    config_file_to_backup=$(find "$(dirname "$0")" -maxdepth 1 -name "proxmox_install_*.conf" -print -quit)
-    if [[ -n "$config_file_to_backup" ]]; then
-        cp "$config_file_to_backup" "$backup_mount/luks_headers_${CONFIG_VARS[HOSTNAME]}/"
-    fi
-
-    sync
-    umount "$backup_mount"
-
-    show_success "LUKS headers backed up to $backup_dev"
+    log_debug "Exiting function: ${FUNCNAME[0]}"
 }
 
 finalize() {
+    log_debug "Entering function: ${FUNCNAME[0]}"
     show_step "FINALIZE" "Finalizing Installation"
 
     show_progress "Exporting ZFS pool..."
-    zpool export "${CONFIG_VARS[ZFS_POOL_NAME]}"
+    log_debug "Exporting ZFS pool: ${CONFIG_VARS[ZFS_POOL_NAME]}"
+    zpool export "${CONFIG_VARS[ZFS_POOL_NAME]}" &>> "$LOG_FILE"
+    log_debug "ZFS pool export command executed."
 
     show_progress "Closing LUKS devices..."
+    log_debug "Closing LUKS devices. Mappers: ${CONFIG_VARS[LUKS_MAPPERS]:-None}"
     local num_mappers
     num_mappers=$(echo "${CONFIG_VARS[LUKS_MAPPERS]:-}" | wc -w)
+    log_debug "Number of mappers to close: $num_mappers"
     for i in $(seq 0 $((num_mappers - 1))); do
-        cryptsetup close "${CONFIG_VARS[LUKS_MAPPER_NAME]}_$i" || true
+        local mapper_to_close="${CONFIG_VARS[LUKS_MAPPER_NAME]}_$i"
+        log_debug "Closing LUKS mapper: $mapper_to_close"
+        cryptsetup close "$mapper_to_close" &>> "$LOG_FILE" || log_debug "cryptsetup close $mapper_to_close failed (non-critical, || true)"
     done
+    log_debug "Finished closing LUKS devices."
 
-    umount /mnt/boot/efi || true
-    umount /mnt/boot || true
-    umount /mnt || true
+    log_debug "Unmounting /mnt/boot/efi, /mnt/boot, /mnt."
+    umount /mnt/boot/efi &>> "$LOG_FILE" || log_debug "Unmount /mnt/boot/efi failed (non-critical, || true)"
+    umount /mnt/boot &>> "$LOG_FILE" || log_debug "Unmount /mnt/boot failed (non-critical, || true)"
+    umount /mnt &>> "$LOG_FILE" || log_debug "Unmount /mnt failed (non-critical, || true)"
+    log_debug "Final unmounts attempted."
 
     show_header "INSTALLATION COMPLETE"
     echo -e "${GREEN}Proxmox VE has been successfully installed!${RESET}\n"
@@ -1021,5 +467,8 @@ finalize() {
         echo "The system will NOT boot without the header disk (${CONFIG_VARS[HEADER_DISK]})."
     fi
 
-    echo -e "\n${GREEN}Installation log saved to:${RESET} /var/log/proxmox-install.log"
+    echo -e "\n${GREEN}Installation log saved to:${RESET} /var/log/proxmox-install.log" # This is the log inside the installed system
+    log_debug "Finalize function complete. Installation is considered successful from script's perspective."
+    log_debug "The main debug log for the installer itself is: $LOG_FILE"
+    log_debug "Exiting function: ${FUNCNAME[0]}"
 }
