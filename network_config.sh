@@ -56,21 +56,70 @@ configure_network_early() {
     show_warning "DHCP failed. Manual network configuration required."
 
     # Manual network setup using dialog
-    log_debug "Preparing for manual network setup dialog."
-    # local iface_array=("$ifaces") # This variable was unused as the loop below iterates over 'ifaces' directly.
+    log_debug "Preparing for manual network setup dialog with improved interface detection."
+
+    local all_potential_ifaces=()
+    if [[ -d "/sys/class/net" ]]; then
+        for iface_path in /sys/class/net/*; do
+            local iface_name
+            iface_name=$(basename "$iface_path")
+            # Apply filtering
+            if [[ "$iface_name" == "lo" || \
+                  "$iface_name" == veth* || \
+                  "$iface_name" == virbr* || \
+                  "$iface_name" == docker* || \
+                  "$iface_name" == tun* || \
+                  "$iface_name" == tap* ]]; then
+                log_debug "Excluding interface from manual selection list: $iface_name"
+                continue
+            fi
+            all_potential_ifaces+=("$iface_name")
+        done
+    fi
+    log_debug "Filtered potential interfaces for manual selection: ${all_potential_ifaces[*]}"
+
     local iface_options=()
-    # Correctly iterate if ifaces is a space-separated string
-    for iface_item in $ifaces; do
-        local status; status=$(ip link show "$iface_item" | grep -q "state UP" && echo "UP" || echo "DOWN")
-        iface_options+=("$iface_item" "$iface_item ($status)")
-    done
+    if [[ ${#all_potential_ifaces[@]} -gt 0 ]]; then
+        for iface_item in "${all_potential_ifaces[@]}"; do
+            # Fetch status and IP for dialog
+            local status; status=$(ip link show "$iface_item" 2>/dev/null | grep -q "state UP" && echo "UP" || echo "DOWN")
+            local current_ip; current_ip=$(ip addr show "$iface_item" 2>/dev/null | grep "inet " | awk '{print $2}' | head -1)
+            local info_str="$status" # Renamed to avoid conflict with info command
+            [[ -n "$current_ip" ]] && info_str+=" ($current_ip)"
+            iface_options+=("$iface_item" "$iface_item $info_str" "off") # Added "off" for radiolist default
+        done
+    fi
     log_debug "Interface options for dialog: ${iface_options[*]}"
 
     local selected_iface
-    selected_iface=$(dialog --title "Network Interface" \
-        --radiolist "Select network interface to configure:" 15 60 ${#iface_options[@]} \
-        "${iface_options[@]}" 3>&1 1>&2 2>&3) || { log_debug "Manual interface selection cancelled."; exit 1; }
-    log_debug "User selected interface: $selected_iface"
+    if [[ $((${#iface_options[@]}/3)) -eq 0 ]]; then # Each option has 3 parts (tag, item, status)
+        log_debug "No suitable interfaces found after filtering for manual selection dialog."
+        dialog --title "Network Setup" --infobox "No suitable network interfaces were automatically detected for selection." 5 70
+        sleep 2
+
+        selected_iface=$(dialog --title "Manual Network Interface" \
+            --inputbox "Please enter the network interface name you wish to configure manually (e.g., enp3s0):" 10 60 \
+            3>&1 1>&2 2>&3) || {
+                log_error "Manual interface input cancelled by user.";
+                show_error "Network configuration cancelled by user."
+                exit 1;
+            }
+        if [[ -z "$selected_iface" ]]; then
+            log_error "No interface name entered by user during manual input."
+            show_error "No network interface name provided. Cannot proceed."
+            exit 1
+        fi
+        log_debug "User manually entered interface: $selected_iface"
+    else
+        selected_iface=$(dialog --title "Network Interface" \
+            --radiolist "Select network interface to configure:" 15 70 $((${#iface_options[@]}/3)) \
+            "${iface_options[@]}" 3>&1 1>&2 2>&3) || {
+                log_debug "Manual interface selection (radiolist) cancelled.";
+                show_error "Network configuration cancelled by user."
+                exit 1;
+            }
+    fi
+    log_debug "User selected interface for manual configuration: $selected_iface"
 
     local ip_addr
     ip_addr=$(dialog --title "IP Address" \
