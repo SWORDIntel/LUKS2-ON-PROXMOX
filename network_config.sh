@@ -142,36 +142,17 @@ download_offline_packages() {
         return 0
     fi
     
-    # Check for the download script
-    local download_script_path="$SCRIPT_DIR/download_debs.sh"
-    if [[ ! -x "$download_script_path" ]]; then
-        log_warning "download_debs.sh not found or not executable. Cannot download packages."
+    # Leverage the consolidated package management script
+    if ! command -v prepare_installer_debs >/dev/null 2>&1; then
+        log_warning "Package management functions not available. Ensure package_management.sh is sourced."
         return 1
     fi
     
-    local debs_dir="$SCRIPT_DIR/debs"
-    # Prompt the user only if the directory is empty.
-    if [[ ! -d "$debs_dir" ]] || [[ -z "$(ls -A "$debs_dir" 2>/dev/null)" ]]; then
-        if (dialog --title "Download .deb Packages" --yesno "The local 'debs' directory is empty. Would you like to download required packages for a potential offline installation?" 10 78); then
-            # Ensure we have network before attempting download
-            if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-                show_error "No internet connection. Cannot download packages."
-                show_warning "Please run network setup or populate the 'debs' folder manually."
-                return 1
-            fi
-            
-            show_progress "Downloading packages for offline installation..."
-            mkdir -p "$debs_dir"
-            if ! "$download_script_path"; then
-                show_error "Failed to download packages. Check logs and package_urls.txt."
-                return 1
-            fi
-            show_success "Packages downloaded successfully to 'debs' directory."
-        else
-            show_warning "Skipping package download. For offline use, ensure 'debs' directory is populated."
-        fi
-    else
-        show_progress "Local 'debs' directory already contains packages."
+    # Use the consolidated function to prepare packages
+    log_debug "Calling prepare_installer_debs for offline package preparation..."
+    if ! prepare_installer_debs; then
+        log_error "Failed to prepare installer packages"
+        return 1
     fi
 
     dialog --title "Air-Gapped Installation" --msgbox "For use on an air-gapped machine, ensure you copy the ENTIRE installer directory (including the 'debs' folder) to your installation media." 10 70

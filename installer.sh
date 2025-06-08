@@ -50,60 +50,76 @@ fi
 readonly RED='\e[91m'
 # shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly GREEN='\e[92m'
-# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
-readonly YELLOW='\e[93m'
-# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
-readonly BLUE='\e[94m'
-# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
-readonly MAGENTA='\e[95m'
-# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
-readonly CYAN='\e[96m'
-# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
-readonly BOLD='\e[1m'
-# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
-readonly RESET='\e[0m'
-# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
-readonly CHECK="${GREEN}✓${RESET}"
-# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
-readonly CROSS="${RED}✗${RESET}"
-# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
-readonly BULLET="${CYAN}•${RESET}"
+source ./ui_functions.sh
+source ./package_management.sh
+source ./network_config.sh
+source ./ramdisk_setup.sh
+source ./preflight_checks.sh
+source ./core_logic.sh # Contains init_environment, gather_user_options, etc.
+source ./disk_operations.sh
+source ./encryption_logic.sh
+source ./zfs_logic.sh
+source ./system_config.sh
+source ./bootloader_logic.sh
+source ./clover_bootloader.sh
+source ./health_checks.sh
+# validation_module.sh is assumed if --validate is used.
+# source ./validation_module.sh
 
 # --- Global Variables ---
-# shellcheck disable=SC2034 # Used in sourced core_logic.sh and other scripts
-TEMP_DIR="" # LOG_FILE is already defined and exported
-# shellcheck disable=SC2034 # Used in sourced core_logic.sh and other scripts
 RAMDISK_MNT="/mnt/ramdisk"
-declare -A CONFIG_VARS # Associative array to hold all config
+declare -A CONFIG_VARS # Association array to hold all config
 
-# --- Additional safety globals ---
-# shellcheck disable=SC2034 # Used in sourced core_logic.sh (partition_and_format_disks)
-INSTALLER_DEVICE=$(df / | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//')
+# Safely detect the installer device with fallbacks and validation
+if ! INSTALL_SOURCE=$(findmnt -n -o SOURCE --target / 2>/dev/null); then
+    echo "Warning: Could not determine source device. Using fallback method." >&2
+    # Try a different approach if findmnt fails
+    INSTALL_SOURCE=$(mount | grep ' / ' | cut -d' ' -f1)
+    
+    # If still empty, use a safe default
+    if [[ -z "$INSTALL_SOURCE" ]]; then
+        echo "Warning: Using /dev/sda as fallback installer device" >&2
+        INSTALL_SOURCE="/dev/sda1"
+    fi
+fi
+
+# Normalize device path - handle both /dev/sdX and potentially unusual formats
+if [[ "$INSTALL_SOURCE" == /dev/disk/by-* || "$INSTALL_SOURCE" == /dev/id/* ]]; then
+    # For unusual device paths, try to resolve to standard device
+    REAL_DEVICE=$(readlink -f "$INSTALL_SOURCE" 2>/dev/null)
+    if [[ -n "$REAL_DEVICE" ]]; then
+        INSTALLER_DEVICE=${REAL_DEVICE%[0-9]*} # Strip partition numbers
+    else
+        # If readlink fails, at least strip partition number
+        INSTALLER_DEVICE=${INSTALL_SOURCE%[0-9]*}
+    fi
+else
+    # Standard device path handling
+    INSTALLER_DEVICE=${INSTALL_SOURCE%[0-9]*} # Strip partition numbers
+fi
+
+# Extra validation and logging
+if [[ ! -b "$INSTALLER_DEVICE" ]]; then
+    echo "Warning: Installer device '$INSTALLER_DEVICE' is not a valid block device." >&2
+    # Continue anyway - the script will warn again later if needed
+fi
+
 export INSTALLER_DEVICE
-readonly INSTALLER_DEVICE
-# shellcheck disable=SC2034 # Used in sourced preflight_checks.sh
+echo "Detected installer device: $INSTALLER_DEVICE" >> "$LOG_FILE"
 readonly MIN_RAM_MB=4096
-# shellcheck disable=SC2034 # Used in sourced preflight_checks.sh
-readonly MIN_DISK_GB=32
+readonly MIN_DISK_GB=8
 
-# --- Source external function libraries ---
-source ./ui_functions.sh
-source ./preflight_checks.sh
-source ./install_dependencies.sh
-source ./network_config.sh
-source ./core_logic.sh
-source ./ramdisk_setup.sh
-source ./validation_module.sh
-source ./health_checks.sh
-
+# The sequence of core installation steps.
 run_installation_logic() {
-    if [[ "${CONFIG_FILE_PATH:-}" ]]; then
+    log_debug "Entering function: run_installation_logic"
+    # Load config or gather user options.
+    if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then
         load_config "$CONFIG_FILE_PATH"
     else
         clear
         gather_user_options
     fi
-    
+
     partition_and_format_disks
     health_check "disks" true
     
@@ -114,18 +130,22 @@ run_installation_logic() {
     health_check "zfs" true
     
     install_base_system
-    health_check "system" true
     
     configure_new_system
+    health_check "system" true
     
-    if [[ "${CONFIG_VARS[USE_CLOVER]:-}" == "yes" ]]; then
-        install_clover_bootloader
+    # Optional components
+    if [[ "${CONFIG_VARS[USE_CLOVER]:-no}" == "yes" ]]; then
+        install_enhanced_clover_bootloader # Corrected function name
     fi
-    
+    if [[ "${CONFIG_VARS[USE_YUBIKEY]:-no}" == "yes" ]]; then
+        # The YubiKey setup happens within setup_luks_encryption or system_config
+        log_debug "YubiKey setup is handled within encryption and chroot stages."
+    fi
+
     backup_luks_header
     finalize
     
-    # Final comprehensive health check
     health_check "all" false
 }
 
@@ -149,107 +169,88 @@ main() {
                 log_debug "Argument: --config detected with value: $config_file"
                 shift 2
                 ;;
-            --validate)
-                validate_only=true
-                log_debug "Argument: --validate detected"
-                shift
-                ;;
             --no-ram-boot)
                 no_ram_boot=true
                 log_debug "Argument: --no-ram-boot detected"
                 shift
                 ;;
-            --help)
-                log_debug "Argument: --help detected"
-                echo "Usage: $0 [--config <config_file>]"
-                echo "       $0 --run-from-ram [--config <config_file>]"
-                echo "       $0 --validate [--config <config_file>]"
-                echo "       $0 --no-ram-boot [--config <config_file>]"
+            --validate)
+                validate_only=true
+                log_debug "Argument: --validate detected"
+                shift
+                ;;
+            --help|-h)
+                echo "Usage: $0 [--config <file>] [--no-ram-boot] [--validate] [--run-from-ram]"
+                echo "Options:"
+                echo "  --config <file>   : Use specified config file for automated installation"
+                echo "  --no-ram-boot     : Skip RAM environment pivot (not recommended)"
+                echo "  --validate        : Run in validation mode only (no changes made)"
+                echo "  --run-from-ram    : Internal use - indicates script is running from RAM"
+                echo "  --help, -h        : Show this help message"
                 exit 0
                 ;;
-            *)
-                # AUDIT-FIX (SC2086): Quoted variable to prevent word splitting if the option contains spaces.
-                show_error "Unknown option: \"$1\""
-                log_debug "Unknown option: $1"
-                exit 1
-                ;;
+            *) show_error "Unknown option: '$1'" && exit 1 ;;
         esac
     done
     export CONFIG_FILE_PATH="$config_file"
-    log_debug "CONFIG_FILE_PATH exported: ${CONFIG_FILE_PATH:-Not Set}"
-
-    # init_environment is defined in core_logic.sh, which is sourced.
-    # Sourcing happens before main() is called.
-    log_debug "Calling init_environment..."
-    init_environment
-    log_debug "init_environment finished."
     
-    # Install dependencies from /debs first before any other operations
-    log_debug "Installing local dependencies from /debs directory..."
-    install_local_dependencies
-    log_debug "Local dependencies installation finished."
+    # Initialize environment (creates temp dirs, sets traps)
+    init_environment
 
-    # Check if we're in validation mode first, as this doesn't require RAM pivot
+    # Install dependencies early to ensure dialog and other tools are available
+    ensure_essential_packages
+    
+    # Handle validation mode first as it doesn't require RAM pivot
     if [[ "$validate_only" == true ]]; then
-        log_debug "Validation mode detected, skipping RAM pivot and running validation"
+        log_debug "Validation mode detected, running validation checks only"
+        # Source the validation module specifically for this mode
+        source ./validation_module.sh
         show_header "VALIDATION MODE"
-        # Basic connectivity check for validation purposes only
-        check_basic_connectivity
+        ensure_network_connectivity || show_warning "Network connectivity issues may affect validation"
         validate_installation
         log_debug "Validation completed, exiting..."
         exit 0
     fi
     
-    # Run from RAM environment decision
+    # --- MAIN EXECUTION FLOW ---
+
     if [[ "$run_from_ram" == true ]]; then
-        log_debug "Already running from RAM environment. Proceeding with installation..."
+        # We are now running inside the RAM disk.
+        log_debug "Execution environment: In RAM disk."
+        show_header "SYSTEM RUNNING FROM RAM"
         
-        # Network configuration (now moved to happen AFTER RAM pivot)
-        configure_network_in_ram
-        
-        # Run the main installation logic now that we're in RAM
-        log_debug "Calling run_installation_logic from RAM environment..."
+        # 1. Configure network. This is the first step that needs it.
+        ensure_network_connectivity || show_warning "Could not establish network connection. Some features may fail."
+
+        # 2. Run the main installation logic.
         run_installation_logic
-        log_debug "run_installation_logic finished."
+    
     else
-        # Not yet in RAM, need to pivot
+        # We are on the original boot media. We need to prepare and pivot.
+        log_debug "Execution environment: Original boot media."
+        
+        # 1. Pre-flight checks are essential before we do anything.
+        run_system_preflight_checks
+
+        # 2. Handle the --no-ram-boot edge case.
         if [[ "$no_ram_boot" == true ]]; then
-            log_debug "RAM boot disabled by user. Running installation directly (not recommended)"
-            show_warning "Running without RAM pivot. This is not recommended as it may cause issues when modifying boot media."
-            
-            # Minimal network configuration for package download only
-            configure_minimal_network
-            
-            # Download packages if needed for offline installation
-            download_offline_packages
-            
-            # Run installation directly
-            log_debug "Calling run_installation_logic without RAM pivot..."
+            show_header "DIRECT INSTALLATION (NO RAM PIVOT)"
+            show_warning "This is a DANGEROUS mode. The installer device ($INSTALLER_DEVICE) cannot be used as a target."
+            if ! dialog --title "Confirm Dangerous Operation" --yesno "You have selected --no-ram-boot. This prevents installing to the boot media. Are you sure you want to proceed?" 10 70; then
+                exit 1
+            fi
+            # Set up network and run installation directly.
+            ensure_network_connectivity || show_warning "Could not establish network connection."
             run_installation_logic
-            log_debug "run_installation_logic finished."
         else
-            log_debug "Standard installation path: preparing RAM environment first"
-            
-            # Minimal network configuration for package download only
-            # This is a stripped-down version just to get packages before RAM pivot
-            configure_minimal_network
-            
-            # Download packages for offline installation if needed
-            download_offline_packages
-            
-            # Run pre-flight checks before RAM pivot
-            log_debug "Running pre-flight checks before RAM pivot..."
-            run_system_preflight_checks
-            
-            # Now pivot to RAM - all disk operations will happen after this
-            log_debug "Pivoting to RAM environment..."
-            prepare_ram_environment
-            log_debug "prepare_ram_environment called. Script should re-launch in RAM mode."
+            # 3. Standard path: Pivot to RAM.
+            # This function handles everything: creating the RAM disk, copying files,
+            # and re-executing this script with the --run-from-ram flag.
+            prepare_and_pivot_to_ram
         fi
     fi
     
-    # This block is now handled in the main flow restructuring above
-    log_debug "Execution flow handled by the main RAM-first logic structure"
+    log_debug "Main execution flow complete."
 }
 
 # Start execution

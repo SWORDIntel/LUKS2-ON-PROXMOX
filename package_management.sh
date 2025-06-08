@@ -219,6 +219,30 @@ populate_offline_cache() {
     return 0
 }
 
+#-------------------------------------------------------------------------------
+# Convenience function for ensuring essential base packages
+#-------------------------------------------------------------------------------
+ensure_essential_packages() {
+    log_debug "Entering function: ${FUNCNAME[0]}"
+    
+    # Get essential packages from our predefined arrays
+    local essential_packages=(
+        "${BASE_PACKAGES[@]}"
+        "dialog" # Ensure dialog is available for UI
+        "pv"     # For RAM disk progress monitoring
+    )
+    
+    # Remove any duplicates
+    readarray -t essential_packages < <(printf '%s\n' "${essential_packages[@]}" | sort -u)
+    
+    log_debug "Installing ${#essential_packages[@]} essential packages"
+    ensure_packages_installed "${essential_packages[@]}"
+    
+    local status=$?
+    log_debug "Exiting function: ${FUNCNAME[0]} with status: $status"
+    return $status
+}
+
 # Function to prepare all installer packages using the predefined package lists
 # This should be called from the main installer to prepare the offline cache
 prepare_installer_debs() {
