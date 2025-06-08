@@ -119,6 +119,7 @@ setup_luks_encryption() {
         show_success "Detached headers created on ${CONFIG_VARS[HEADER_DISK]}."
     fi
 
+    # shellcheck disable=SC2153 # LUKS_MAPPERS is a key in associative array CONFIG_VARS.
     CONFIG_VARS[LUKS_MAPPERS]="${luks_mappers[*]}"
     log_debug "All LUKS mappers: ${CONFIG_VARS[LUKS_MAPPERS]}"
     show_success "All LUKS volumes created and opened."

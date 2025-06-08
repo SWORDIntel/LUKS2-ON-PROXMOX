@@ -50,7 +50,7 @@ install_base_system() {
     show_success "Base system installed (debootstrap successful)."
 
     log_debug "Copying main log file to /mnt/var/log/proxmox-install.log"
-    cp "$LOG_FILE" /mnt/var/log/proxmox-install.log &>> "$LOG_FILE"
+    cp "$LOG_FILE" /mnt/var/log/proxmox-install.log
     # No longer a separate debootstrap_log to copy, it's part of the main LOG_FILE.
     log_debug "Exiting function: ${FUNCNAME[0]}"
 }

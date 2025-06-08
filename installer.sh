@@ -46,26 +46,42 @@ if [ -z "$BASH_VERSION" ] || [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
 fi
 
 # --- Formatting & Style ---
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly RED='\e[91m'
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly GREEN='\e[92m'
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly YELLOW='\e[93m'
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly BLUE='\e[94m'
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly MAGENTA='\e[95m'
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly CYAN='\e[96m'
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly BOLD='\e[1m'
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly RESET='\e[0m'
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly CHECK="${GREEN}✓${RESET}"
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly CROSS="${RED}✗${RESET}"
+# shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly BULLET="${CYAN}•${RESET}"
 
 # --- Global Variables ---
+# shellcheck disable=SC2034 # Used in sourced core_logic.sh and other scripts
 TEMP_DIR="" # LOG_FILE is already defined and exported
+# shellcheck disable=SC2034 # Used in sourced core_logic.sh and other scripts
 RAMDISK_MNT="/mnt/ramdisk"
 declare -A CONFIG_VARS # Associative array to hold all config
 
 # --- Additional safety globals ---
+# shellcheck disable=SC2034 # Used in sourced core_logic.sh (partition_and_format_disks)
 INSTALLER_DEVICE=$(df / | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//'); readonly INSTALLER_DEVICE
+# shellcheck disable=SC2034 # Used in sourced preflight_checks.sh
 readonly MIN_RAM_MB=4096
+# shellcheck disable=SC2034 # Used in sourced preflight_checks.sh
 readonly MIN_DISK_GB=32
 
 # --- Source external function libraries ---

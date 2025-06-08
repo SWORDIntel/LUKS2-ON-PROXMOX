@@ -37,7 +37,7 @@ install_clover_bootloader() {
 
     show_progress "Installing Clover..."
     log_debug "Changing directory to $TEMP_DIR for Clover extraction."
-    cd "$TEMP_DIR"
+    cd "$TEMP_DIR" || { log_debug "Failed to cd to $TEMP_DIR in ${FUNCNAME[0]}"; exit 1; }
     log_debug "Extracting $clover_zip_path using 7z."
     7z x -y "$clover_zip_path" -o"$TEMP_DIR/CloverExtract" &>> "$LOG_FILE" # Extract to a specific subdir
     log_debug "7z extraction finished. Exit status: $?"
@@ -111,14 +111,33 @@ CLOVER_CONFIG
     # We need to extract the partition number from CLOVER_EFI_PART.
     # A simple way if CLOVER_EFI_PART is like /dev/sda1 is to remove the /dev/sda part.
     # More robustly: find partition number for CLOVER_EFI_PART on CLOVER_DISK
-    local part_num=$(lsblk -no MAJ:MIN,PARTN "$clover_disk_for_efibootmgr" | grep "$(lsblk -no MAJ:MIN "$clover_efi" | head -n1)" | awk '{print $NF}')
-    if [[ -z "$part_num" ]]; then
+    local part_num_raw
+    part_num_raw=$(lsblk -no MAJ:MIN,PARTN "$clover_disk_for_efibootmgr" | grep "$(lsblk -no MAJ:MIN "$clover_efi" | head -n1)" | awk '{print $NF}')
+    local part_num # Final partition number
+    if [[ -n "$part_num_raw" ]]; then
+        part_num="$part_num_raw"
+    else
         # Fallback for devices like /dev/mmcblk0p1 where PARTN is not directly listed
-        part_num=$(echo "$clover_efi" | sed "s|^${clover_disk_for_efibootmgr}[p]*||")
+        # or if the lsblk | grep | awk chain fails for some reason.
+        log_debug "Initial part_num detection failed for $clover_efi on $clover_disk_for_efibootmgr. Falling back to string manipulation."
+        local part_num_suffix
+        part_num_suffix="${clover_efi#"$clover_disk_for_efibootmgr"}" # e.g., "p1" or "1" from "/dev/sda1" and "/dev/sda"
+        if [[ "${part_num_suffix:0:1}" == "p" ]]; then # Check if first char is 'p'
+            part_num="${part_num_suffix:1}" # Remove 'p'
+        else
+            part_num="$part_num_suffix"
+        fi
+        log_debug "Fallback part_num derived as: $part_num from suffix $part_num_suffix"
     fi
 
-    log_debug "Executing efibootmgr: efibootmgr -c -d $clover_disk_for_efibootmgr -p $part_num -L \"Clover\" -l '\\EFI\\CLOVER\\CLOVERX64.efi'"
-    efibootmgr -c -d "$clover_disk_for_efibootmgr" -p "$part_num" -L "Clover" -l '\EFI\CLOVER\CLOVERX64.efi' &>> "$LOG_FILE" || log_debug "efibootmgr command failed or no changes made (|| true behavior in original)."
+    if [[ -z "$part_num" ]]; then
+        log_debug "Critical: Could not determine partition number for $clover_efi on $clover_disk_for_efibootmgr. efibootmgr will likely fail."
+        # Optionally, exit here or let efibootmgr fail and log it.
+        # For now, let it try, it might still work if the fallback produced something usable by chance.
+    fi
+
+    log_debug "Executing efibootmgr: efibootmgr -c -d $clover_disk_for_efibootmgr -p \"$part_num\" -L \"Clover\" -l '\\EFI\\CLOVER\\CLOVERX64.efi'"
+    efibootmgr -c -d "$clover_disk_for_efibootmgr" -p "$part_num" -L "Clover" -l '\EFI\CLOVER\CLOVERX64.efi' &>> "$LOG_FILE" || log_debug "efibootmgr command failed or no changes made (original script had || true)."
     log_debug "UEFI boot entry creation attempted."
 
     log_debug "Changing directory to /"

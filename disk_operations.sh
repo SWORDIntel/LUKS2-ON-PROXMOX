@@ -80,8 +80,8 @@ partition_and_format_disks() {
         part_names=$(lsblk -no NAME -rp "$disk_path" | tail -n +2)
         if [[ -n "$part_names" ]]; then
             local current_disk_already_flagged_for_parts=false
-            # Iterate over each partition name found
-            echo "$part_names" | while IFS= read -r part_name; do
+            # Iterate over each partition name found using process substitution
+            while IFS= read -r part_name; do
                 # Construct full partition path, lsblk -no NAME might give sda1, sda2 etc.
                 local full_part_path="/dev/$part_name"
                 if lsblk -no FSTYPE "$full_part_path" 2>/dev/null | grep -q '[^[:space:]]'; then
@@ -99,7 +99,7 @@ partition_and_format_disks() {
                     # However, iterating all partitions on this disk might be useful for more detailed logging if desired.
                     # For now, just flagging the disk once is enough for the warning.
                 fi
-            done
+            done < <(echo "$part_names") # Process substitution here
             # If this disk was flagged due to partitions, continue to the next disk in the outer loop
             if $current_disk_already_flagged_for_parts; then
                 continue
@@ -256,6 +256,7 @@ partition_and_format_disks() {
         fi
     done
 
+    # shellcheck disable=SC2153 # LUKS_PARTITIONS is a key in associative array CONFIG_VARS.
     CONFIG_VARS[LUKS_PARTITIONS]="${luks_partitions[*]}"
     log_debug "All LUKS partitions identified: ${CONFIG_VARS[LUKS_PARTITIONS]}"
     show_success "All disks partitioned successfully."

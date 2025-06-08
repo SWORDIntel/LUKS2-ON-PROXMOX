@@ -230,6 +230,7 @@ gather_user_options() {
         done < "$TEMP_DIR/avail_disks"
 
         header_disk=$(dialog --title "Header Disk" --radiolist "Select a separate USB/drive for LUKS headers:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || { log_debug "Header disk selection cancelled."; exit 1; }
+        # shellcheck disable=SC2153 # HEADER_DISK is a key in associative array CONFIG_VARS, not a misspelling.
         CONFIG_VARS[HEADER_DISK]="$header_disk"
         log_debug "Selected header disk: ${CONFIG_VARS[HEADER_DISK]}"
     else
@@ -253,6 +254,7 @@ gather_user_options() {
         done < "$TEMP_DIR/avail_disks"
 
         clover_disk=$(dialog --title "Clover Drive" --radiolist "Select a separate drive for the Clover bootloader:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || { log_debug "Clover disk selection cancelled."; exit 1; }
+        # shellcheck disable=SC2153 # CLOVER_DISK is a key in associative array CONFIG_VARS, not a misspelling.
         CONFIG_VARS[CLOVER_DISK]="$clover_disk"
         log_debug "Selected Clover disk: ${CONFIG_VARS[CLOVER_DISK]}"
     else
@@ -402,7 +404,8 @@ gather_user_options() {
     # Save Config
     log_debug "Prompting to save configuration..."
     if (dialog --title "Save Configuration" --yesno "Save this configuration for future non-interactive installations?" 8 70); then
-        local conf_file_name="proxmox_install_$(date +%F_%H%M%S).conf"
+        local conf_file_name
+        conf_file_name="proxmox_install_$(date +%F_%H%M%S).conf"
         log_debug "User chose to save configuration to $conf_file_name."
         # SCRIPT_DIR is not available here, need to use relative path or pass it.
         # Assuming installer.sh and core_logic.sh are in the same directory.
