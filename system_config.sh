@@ -140,11 +140,29 @@ EOF
 
         apt-get update
 
+        # Install core packages first
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
             linux-image-amd64 linux-headers-amd64 \
             zfs-initramfs cryptsetup-initramfs \
-            grub-efi-amd64 efibootmgr \
             bridge-utils ifupdown2
+
+        # Conditional GRUB installation
+        _GRUB_MODE="${BOOT_MODE}" # BOOT_MODE is exported from the main script
+        _PRIMARY_DISK="${PVE_PRIMARY_TARGET_DISK}" # Exported from the main script
+
+        echo "[PROXMOX_AIO_INSTALLER_CHROOT] Detected BOOT_MODE: ${_GRUB_MODE}" >> /dev/kmsg
+        echo "[PROXMOX_AIO_INSTALLER_CHROOT] Primary target disk for GRUB (BIOS): ${_PRIMARY_DISK}" >> /dev/kmsg
+
+        if [[ "${_GRUB_MODE}" == "UEFI" ]]; then
+            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Installing UEFI GRUB packages..." >> /dev/kmsg
+            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-efi-amd64 efibootmgr
+        elif [[ "${_GRUB_MODE}" == "BIOS" ]]; then
+            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Installing BIOS GRUB packages..." >> /dev/kmsg
+            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-pc
+        else
+            echo "[PROXMOX_AIO_INSTALLER_CHROOT] ERROR: Unknown BOOT_MODE: ${_GRUB_MODE}. Cannot install GRUB." >> /dev/kmsg
+            exit 1 # Critical error
+        fi
 
         echo "[PROXMOX_AIO_INSTALLER_CHROOT] Checking and installing YubiKey packages..." >> /dev/kmsg
         if [[ "${USE_YUBIKEY}" == "yes" ]]; then
@@ -244,12 +262,30 @@ EOF
         echo "UUID=$boot_uuid /boot ext4 defaults 0 2" >> /etc/fstab
         local efi_uuid
         efi_uuid=$(blkid -s UUID -o value "${EFI_PART}")
-        echo "UUID=$efi_uuid /boot/efi vfat umask=0077 0 1" >> /etc/fstab
+        if [[ "${_GRUB_MODE}" == "UEFI" ]]; then
+            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Adding /boot/efi to fstab for UEFI mode." >> /dev/kmsg
+            echo "UUID=$efi_uuid /boot/efi vfat umask=0077 0 1" >> /etc/fstab
+        else
+            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Skipping /boot/efi in fstab for BIOS mode." >> /dev/kmsg
+        fi
 
         echo "[PROXMOX_AIO_INSTALLER_CHROOT] Updating initramfs after potential YubiKey configuration..." >> /dev/kmsg
         update-initramfs -c -k all
 
-        grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=proxmox
+        if [[ "${_GRUB_MODE}" == "UEFI" ]]; then
+            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Running grub-install for UEFI..." >> /dev/kmsg
+            grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=proxmox --recheck
+        elif [[ "${_GRUB_MODE}" == "BIOS" ]]; then
+            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Running grub-install for BIOS on ${_PRIMARY_DISK}..." >> /dev/kmsg
+            if [[ -z "${_PRIMARY_DISK}" ]]; then
+                echo "[PROXMOX_AIO_INSTALLER_CHROOT] ERROR: PVE_PRIMARY_TARGET_DISK is not set for BIOS GRUB install." >> /dev/kmsg
+                exit 1 # Critical error
+            fi
+            grub-install --target=i386-pc --recheck "${_PRIMARY_DISK}"
+        else
+            echo "[PROXMOX_AIO_INSTALLER_CHROOT] ERROR: Unknown BOOT_MODE: ${_GRUB_MODE}. Cannot run grub-install." >> /dev/kmsg
+            exit 1 # Critical error
+        fi
         update-grub
 
         echo "root:${ROOT_PASSWORD}" | chpasswd
@@ -298,6 +334,22 @@ CHROOT_SCRIPT
     log_debug "  ROOT_PASSWORD has been set (not logged)."
     export USE_YUBIKEY="${CONFIG_VARS[USE_YUBIKEY]:-no}" # Export USE_YUBIKEY
     log_debug "  USE_YUBIKEY exported: ${USE_YUBIKEY}"
+    # Export EFFECTIVE_GRUB_MODE as BOOT_MODE for the chroot script's internal logic
+    export BOOT_MODE="${CONFIG_VARS[EFFECTIVE_GRUB_MODE]}"
+    log_debug "  BOOT_MODE exported for chroot (from EFFECTIVE_GRUB_MODE): ${BOOT_MODE}"
+
+    # Determine and export PVE_PRIMARY_TARGET_DISK
+    local primary_disk_for_grub
+    # Read the first disk from the space-separated list in ZFS_TARGET_DISKS
+    read -r primary_disk_for_grub _ <<< "${CONFIG_VARS[ZFS_TARGET_DISKS]}"
+    # Remove partition number if present (e.g. /dev/sda1 -> /dev/sda) for BIOS grub install
+    # This is a basic approach; more robust disk identification might be needed if complex partitioning is involved
+    # However, for ZFS target disks, we typically provide whole disks.
+    # For BIOS GRUB, it's usually installed to the MBR of the disk, not a partition.
+    primary_disk_for_grub=$(echo "$primary_disk_for_grub" | sed 's/[0-9]*$//')
+    export PVE_PRIMARY_TARGET_DISK="$primary_disk_for_grub"
+    log_debug "  PVE_PRIMARY_TARGET_DISK exported: ${PVE_PRIMARY_TARGET_DISK}"
+
 
     show_progress "Configuring system in chroot (this will take several minutes)..."
     log_debug "Executing chroot /mnt /tmp/configure.sh"

@@ -30,13 +30,17 @@ run_system_preflight_checks() {
 
     # EFI mode check
     log_debug "Checking for EFI mode..."
-    if [[ ! -d "/sys/firmware/efi" ]]; then
+    if [[ -d "/sys/firmware/efi" ]]; then
+        log_debug "System booted in EFI mode (/sys/firmware/efi found)."
+        DETECTED_BOOT_MODE="UEFI"
+        show_success "System booted in UEFI mode."
+    else
         log_debug "System not booted in EFI mode (/sys/firmware/efi not found)."
-        show_error "System not booted in EFI mode."
-        exit 1
+        DETECTED_BOOT_MODE="BIOS"
+        show_warning "System appears to be booted in BIOS mode. Ensure this is intended."
     fi
-    log_debug "System booted in EFI mode: OK."
-    show_success "System booted in EFI mode."
+    export DETECTED_BOOT_MODE
+    log_debug "DETECTED_BOOT_MODE set to: $DETECTED_BOOT_MODE"
 
     # Memory check
     log_debug "Checking available RAM..."

@@ -89,6 +89,35 @@ gather_user_options() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     show_header "CONFIGURATION"
 
+    # Boot Mode Confirmation
+    log_debug "Prompting user to confirm boot mode. Detected: ${DETECTED_BOOT_MODE}"
+    local uefi_selected="off"
+    local bios_selected="off"
+    if [[ "${DETECTED_BOOT_MODE}" == "UEFI" ]]; then
+        uefi_selected="on"
+    else
+        bios_selected="on" # Default to BIOS if not UEFI or if var is empty
+    fi
+
+    local chosen_boot_mode
+    chosen_boot_mode=$(dialog --title "Boot Mode Confirmation" \
+        --radiolist "The installer detected you are likely booted in ${DETECTED_BOOT_MODE} mode. Please confirm or select your desired boot mode for the target Proxmox installation:" \
+        15 80 2 \
+        "UEFI" "Install for UEFI boot" "$uefi_selected" \
+        "BIOS" "Install for BIOS/Legacy boot" "$bios_selected" \
+        3>&1 1>&2 2>&3) || {
+            log_debug "Boot mode selection cancelled by user.";
+            show_error "Boot mode selection cancelled. Exiting.";
+            exit 1;
+        }
+    CONFIG_VARS[BOOT_MODE]="$chosen_boot_mode"
+    log_debug "Detected boot mode: ${DETECTED_BOOT_MODE}. User selected boot mode: ${CONFIG_VARS[BOOT_MODE]}"
+    show_progress "User selected boot mode: ${CONFIG_VARS[BOOT_MODE]}"
+
+    # Initialize EFFECTIVE_GRUB_MODE based on the selected BOOT_MODE
+    CONFIG_VARS[EFFECTIVE_GRUB_MODE]="${CONFIG_VARS[BOOT_MODE]}"
+    log_debug "Initial EFFECTIVE_GRUB_MODE set to: ${CONFIG_VARS[EFFECTIVE_GRUB_MODE]} (based on selected BOOT_MODE)"
+
     # ZFS Pool Configuration TUI
     local zfs_disks=()
     local disk_options=()
@@ -216,78 +245,206 @@ gather_user_options() {
     log_debug "USE_DETACHED_HEADERS set to: ${CONFIG_VARS[USE_DETACHED_HEADERS]}"
 
     if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]}" == "yes" ]]; then
-        CONFIG_VARS[USE_DETACHED_HEADERS]="yes"
-        log_debug "Detached headers selected. Prompting for header disk."
-        local header_disk
+        log_debug "User selected Detached Headers. Looking for suitable disks."
         local all_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]}"
-        local available_disks=()
+        local available_disks_for_header=() # Renamed to avoid conflict
 
-        lsblk -dno NAME,SIZE,MODEL | grep -v "loop\|sr" | sort > "$TEMP_DIR/avail_disks"
+        lsblk -dno NAME,SIZE,MODEL | grep -v "loop\|sr" | sort > "$TEMP_DIR/avail_disks_for_header"
         while read -r name size model; do
             if ! echo "$all_disks_str" | grep -q -w "/dev/$name"; then
-                available_disks+=("/dev/$name" "$name ($size, $model)")
+                available_disks_for_header+=("/dev/$name" "$name ($size, $model)" "off") # Added "off" for radiolist
             fi
-        done < "$TEMP_DIR/avail_disks"
+        done < "$TEMP_DIR/avail_disks_for_header"
 
-        header_disk=$(dialog --title "Header Disk" --radiolist "Select a separate USB/drive for LUKS headers:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || { log_debug "Header disk selection cancelled."; exit 1; }
-        # shellcheck disable=SC2153 # HEADER_DISK is a key in associative array CONFIG_VARS, not a misspelling.
+        if [[ ${#available_disks_for_header[@]} -eq 0 ]]; then
+            log_debug "No suitable separate drives found for detached LUKS headers."
+            dialog --title "No Suitable Drives" --msgbox "No suitable separate drives were found to be used for detached LUKS headers. You can either attach a new drive and restart the installer, or choose to use standard on-disk encryption." 10 70
+            CONFIG_VARS[USE_DETACHED_HEADERS]="no" # Revert choice
+            show_encryption_menu=true # Go back to the main encryption menu
+            # This continue will skip the rest of the detached header logic in the current
+            # iteration and go to the next iteration of the while loop,
+            # which will re-display the encryption menu because show_encryption_menu is true.
+            continue
+        fi
+
+        local header_disk
+        header_disk=$(dialog --title "Header Disk" --radiolist "Select a separate USB/drive for LUKS headers:" 15 70 $((${#available_disks_for_header[@]}/3)) "${available_disks_for_header[@]}" 3>&1 1>&2 2>&3) || {
+            log_debug "Header disk selection cancelled by user.";
+            # If user cancels header disk selection, also go back to encryption menu
+            CONFIG_VARS[USE_DETACHED_HEADERS]="no"; # Revert choice
+            show_encryption_menu=true;
+            continue; # Go back to the main encryption menu
+        }
         CONFIG_VARS[HEADER_DISK]="$header_disk"
         log_debug "Selected header disk: ${CONFIG_VARS[HEADER_DISK]}"
+
+        # Ask to format or use existing partition
+        if (dialog --title "Header Disk Setup" --yesno "You've selected ${CONFIG_VARS[HEADER_DISK]} for LUKS headers. Do you want to format this disk (creating a new, dedicated partition for headers)?" 10 70); then
+            CONFIG_VARS[FORMAT_HEADER_DISK]="yes"
+            log_debug "User chose to format header disk: ${CONFIG_VARS[HEADER_DISK]}"
+        else
+            CONFIG_VARS[FORMAT_HEADER_DISK]="no"
+            log_debug "User chose to use an existing partition on header disk: ${CONFIG_VARS[HEADER_DISK]}"
+            local header_part_device
+            header_part_device=$(dialog --title "Header Partition" --inputbox "Enter the existing partition device for LUKS headers on ${CONFIG_VARS[HEADER_DISK]} (e.g., /dev/sdb1):" 10 70 3>&1 1>&2 2>&3) || {
+                log_debug "Header partition input cancelled by user.";
+                # If user cancels, go back to encryption menu
+                CONFIG_VARS[USE_DETACHED_HEADERS]="no"; # Revert choice
+                show_encryption_menu=true;
+                continue; # Go back to the main encryption menu
+            }
+            if ! [[ "$header_part_device" =~ ^/dev/ ]]; then
+                log_error "Invalid header partition device entered: $header_part_device. Does not start with /dev/."
+                # Ideally, loop back or show error and return to menu. For now, logging and continuing.
+                # To properly loop back here, this section would need its own loop.
+                # For now, let's revert and go back to main encryption menu for simplicity on error.
+                dialog --title "Invalid Input" --msgbox "The partition device '$header_part_device' is not valid. It must start with /dev/. Please try again." 8 70
+                CONFIG_VARS[USE_DETACHED_HEADERS]="no"; # Revert
+                show_encryption_menu=true;
+                continue;
+            fi
+            CONFIG_VARS[HEADER_PART_DEVICE]="$header_part_device"
+            log_debug "User selected existing header partition: ${CONFIG_VARS[HEADER_PART_DEVICE]}"
+        fi
     else
-        CONFIG_VARS[USE_DETACHED_HEADERS]="no"
-        log_debug "Standard on-disk encryption selected."
+        # This case is when CONFIG_VARS[USE_DETACHED_HEADERS] was initially "no" (from choice 1 or default)
+        CONFIG_VARS[USE_DETACHED_HEADERS]="no" # Ensure it's explicitly no
+        CONFIG_VARS[FORMAT_HEADER_DISK]="no" # Default, not applicable
+        CONFIG_VARS[HEADER_DISK]=""
+        CONFIG_VARS[HEADER_PART_DEVICE]=""
+        log_debug "Standard on-disk encryption selected or Detached Headers option was not pursued to completion."
     fi
 
-    log_debug "Prompting for legacy boot support (Clover)..."
-    if (dialog --title "Legacy Boot Support" --yesno "Is a separate bootloader drive (Clover) required for this hardware (e.g., non-bootable NVMe)?" 8 70); then
+    # Clover Bootloader Configuration
+    log_debug "Prompting for Clover bootloader support..."
+    local clover_prompt_text
+    if [[ "${CONFIG_VARS[BOOT_MODE]}" == "UEFI" ]]; then
+        clover_prompt_text="Install Clover on a separate drive for special boot requirements (optional for UEFI systems)?"
+        log_debug "Clover prompt for UEFI mode."
+    else # BIOS
+        clover_prompt_text="Install Clover on a separate drive? This is recommended if installing Proxmox to an NVMe drive, as some BIOS versions may not boot from NVMe directly."
+        log_debug "Clover prompt for BIOS mode."
+    fi
+
+    if (dialog --title "Clover Bootloader Support" --yesno "$clover_prompt_text" 10 75); then
         CONFIG_VARS[USE_CLOVER]="yes"
-        log_debug "Clover bootloader selected. Prompting for Clover disk."
-        local clover_disk
-        local all_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]} ${CONFIG_VARS[HEADER_DISK]:-}"
-        local available_disks=()
+        log_debug "User opted to use Clover. Prompting for Clover disk."
+        local clover_disk_options=() # Renamed to avoid conflict
+        # Exclude ZFS target disks and the (potentially chosen) header disk from Clover disk options
+        local excluded_clover_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]} ${CONFIG_VARS[HEADER_DISK]:-}"
+        log_debug "Excluded disks for Clover selection: $excluded_clover_disks_str"
 
-        lsblk -dno NAME,SIZE,MODEL | grep -v "loop\|sr" | sort > "$TEMP_DIR/avail_disks"
+        lsblk -dno NAME,SIZE,MODEL | grep -v "loop\|sr" | sort > "$TEMP_DIR/clover_avail_disks"
         while read -r name size model; do
-            if ! echo "$all_disks_str" | grep -q -w "/dev/$name"; then
-                available_disks+=("/dev/$name" "$name ($size, $model)")
+            # Check if /dev/name is in the excluded list
+            if ! echo "$excluded_clover_disks_str" | grep -q -w "/dev/$name"; then
+                clover_disk_options+=("/dev/$name" "$name ($size, $model)" "off") # Added "off" for radiolist
             fi
-        done < "$TEMP_DIR/avail_disks"
+        done < "$TEMP_DIR/clover_avail_disks"
 
-        clover_disk=$(dialog --title "Clover Drive" --radiolist "Select a separate drive for the Clover bootloader:" 15 70 ${#available_disks[@]} "${available_disks[@]}" 3>&1 1>&2 2>&3) || { log_debug "Clover disk selection cancelled."; exit 1; }
-        # shellcheck disable=SC2153 # CLOVER_DISK is a key in associative array CONFIG_VARS, not a misspelling.
-        CONFIG_VARS[CLOVER_DISK]="$clover_disk"
-        log_debug "Selected Clover disk: ${CONFIG_VARS[CLOVER_DISK]}"
+        if [[ ${#clover_disk_options[@]} -eq 0 ]]; then
+            log_warning "No suitable separate drives found for Clover."
+            dialog --title "No Suitable Drives for Clover" --msgbox "No suitable separate drives were found to install Clover. If Clover is required, please attach a separate drive and restart the installer. Proceeding without Clover." 10 70
+            CONFIG_VARS[USE_CLOVER]="no"
+        else
+            local chosen_clover_disk # Renamed
+            chosen_clover_disk=$(dialog --title "Clover Drive" --radiolist "Select a separate drive for the Clover bootloader:" 15 70 $((${#clover_disk_options[@]}/3)) "${clover_disk_options[@]}" 3>&1 1>&2 2>&3) || {
+                log_debug "Clover disk selection cancelled by user. Proceeding without Clover.";
+                CONFIG_VARS[USE_CLOVER]="no"; # Explicitly set to no on cancel
+            }
+            if [[ "${CONFIG_VARS[USE_CLOVER]}" == "yes" ]]; then # Check if still yes (not cancelled)
+                CONFIG_VARS[CLOVER_DISK]="$chosen_clover_disk"
+                log_debug "Selected Clover disk: ${CONFIG_VARS[CLOVER_DISK]}"
+            fi
+        fi
     else
         CONFIG_VARS[USE_CLOVER]="no"
-        log_debug "Clover bootloader not selected."
+        log_debug "User opted not to use Clover."
     fi
+
+    # Update EFFECTIVE_GRUB_MODE if Clover is being used
+    if [[ "${CONFIG_VARS[USE_CLOVER]}" == "yes" ]]; then
+        log_debug "Clover has been selected. Forcing EFFECTIVE_GRUB_MODE to UEFI for OS drive GRUB installation."
+        CONFIG_VARS[EFFECTIVE_GRUB_MODE]="UEFI"
+    fi
+    log_debug "Final EFFECTIVE_GRUB_MODE: ${CONFIG_VARS[EFFECTIVE_GRUB_MODE]}"
 
     # Network Configuration
     log_debug "Gathering network configuration..."
     show_progress "Gathering network configuration..."
 
     # Get network interfaces
-    log_debug "Detecting network interfaces..."
-    local ifaces
-    ifaces=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo | head -5)
-    local iface_array=()
-    readarray -t iface_array <<<"$ifaces"
-    local iface_options=()
+    log_debug "Detecting network interfaces for primary selection..."
+    local iface_array=() # Initialize empty array
+    if [[ -d "/sys/class/net" ]]; then
+        for iface_path in /sys/class/net/*; do
+            local iface_name
+            iface_name=$(basename "$iface_path")
+            # Apply filtering
+            if [[ "$iface_name" == "lo" || \
+                  "$iface_name" == veth* || \
+                  "$iface_name" == virbr* || \
+                  "$iface_name" == docker* || \
+                  "$iface_name" == tun* || \
+                  "$iface_name" == tap* ]]; then
+                log_debug "Excluding interface from primary NET_IFACE selection list: $iface_name"
+                continue
+            fi
+            iface_array+=("$iface_name")
+        done
+    fi
+    log_debug "Filtered potential interfaces for primary NET_IFACE selection: ${iface_array[*]}"
 
-    for iface in "${iface_array[@]}"; do
-        local status
-        status=$(ip link show "$iface" | grep -q "state UP" && echo "UP" || echo "DOWN")
-        local current_ip
-        current_ip=$(ip addr show "$iface" 2>/dev/null | grep "inet " | awk '{print $2}' | head -1)
-        local info="$status"
-        [[ -n "$current_ip" ]] && info="$status, $current_ip"
-        iface_options+=("$iface" "$iface ($info)")
-    done
+    if [[ ${#iface_array[@]} -eq 0 ]]; then
+        log_warning "No suitable network interfaces automatically detected for primary interface selection."
+        dialog --title "Network Setup" --infobox "No suitable network interfaces were automatically detected for selection." 5 70
+        sleep 2 # Give user a moment to see the infobox
 
-    CONFIG_VARS[NET_IFACE]=$(dialog --title "Network Interface" \
-        --radiolist "Select primary network interface:" 15 70 ${#iface_options[@]} \
-        "${iface_options[@]}" 3>&1 1>&2 2>&3) || { log_debug "Network interface selection cancelled."; exit 1; }
-    log_debug "Selected network interface: ${CONFIG_VARS[NET_IFACE]}"
+        local manual_iface_name
+        manual_iface_name=$(dialog --title "Primary Network Interface" \
+            --inputbox "Please enter the primary network interface name manually (e.g., eno1):" 10 60 \
+            3>&1 1>&2 2>&3) || {
+                log_error "Primary network interface input cancelled by user.";
+                show_error "Network configuration is critical and was cancelled. Exiting.";
+                exit 1;
+            }
+        if [[ -z "$manual_iface_name" ]]; then
+            log_error "No primary network interface name entered by user."
+            show_error "No primary network interface name provided. Cannot proceed. Exiting."
+            exit 1
+        fi
+        CONFIG_VARS[NET_IFACE]="$manual_iface_name"
+        log_debug "User manually entered primary network interface: ${CONFIG_VARS[NET_IFACE]}"
+    else
+        local iface_options=()
+        for iface_item in "${iface_array[@]}"; do # Changed from 'iface' to 'iface_item'
+            local status
+            status=$(ip link show "$iface_item" 2>/dev/null | grep -q "state UP" && echo "UP" || echo "DOWN")
+            local current_ip
+            current_ip=$(ip addr show "$iface_item" 2>/dev/null | grep "inet " | awk '{print $2}' | head -1)
+            local info_str="$status" # Renamed from 'info'
+            [[ -n "$current_ip" ]] && info_str+=" ($current_ip)"
+            # For radiolist, each item needs: <tag> <item> <status_of_item_on/off>
+            iface_options+=("$iface_item" "$iface_item $info_str" "off") # Added "off"
+        done
+        log_debug "Primary interface options for dialog: ${iface_options[*]}"
+
+        # Check if iface_options is not empty before calling dialog
+        if [[ $((${#iface_options[@]}/3)) -eq 0 ]]; then
+             log_error "FATAL: iface_array had items but iface_options became empty. This should not happen."
+             show_error "Internal error preparing network interface list. Exiting."
+             exit 1
+        fi
+
+        CONFIG_VARS[NET_IFACE]=$(dialog --title "Network Interface" \
+            --radiolist "Select primary network interface:" 15 70 $((${#iface_options[@]}/3)) \
+            "${iface_options[@]}" 3>&1 1>&2 2>&3) || {
+                log_debug "Primary network interface selection (radiolist) cancelled.";
+                show_error "Network configuration is critical and was cancelled. Exiting."
+                exit 1;
+            }
+    fi
+    log_debug "Selected primary network interface: ${CONFIG_VARS[NET_IFACE]}"
 
     # DHCP or Static
     log_debug "Prompting for DHCP or static IP configuration..."

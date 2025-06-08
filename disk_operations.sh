@@ -162,36 +162,75 @@ partition_and_format_disks() {
     fi
 
     if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]:-}" == "yes" ]]; then
-        local header_disk="${CONFIG_VARS[HEADER_DISK]}"
-        log_debug "Preparing detached header disk: $header_disk"
-        show_progress "Wiping header disk: $header_disk..."
-        wipefs -a "$header_disk" &>> "$LOG_FILE" || log_debug "wipefs -a $header_disk failed (non-critical)"
-        sgdisk --zap-all "$header_disk" &>> "$LOG_FILE" || log_debug "sgdisk --zap-all $header_disk failed (non-critical)"
+        local header_disk="${CONFIG_VARS[HEADER_DISK]}" # Full disk device, e.g. /dev/sdb
+        log_debug "Processing detached LUKS header disk/partition. Full disk: $header_disk, Format choice: ${CONFIG_VARS[FORMAT_HEADER_DISK]}"
 
-        log_debug "Partitioning header disk $header_disk: sgdisk -n 1:0:0 -t 1:8300 -c 1:LUKS-Headers $header_disk"
-        sgdisk -n 1:0:0 -t 1:8300 -c 1:LUKS-Headers "$header_disk" &>> "$LOG_FILE"
-        log_debug "Running partprobe after header disk partitioning."
-        partprobe &>> "$LOG_FILE"
-        sleep 2
+        if [[ "${CONFIG_VARS[FORMAT_HEADER_DISK]}" == "yes" ]]; then
+            log_debug "Formatting header disk: $header_disk as per user choice."
+            show_progress "Wiping header disk: $header_disk..."
+            wipefs -a "$header_disk" &>> "$LOG_FILE" || log_debug "wipefs -a $header_disk failed (non-critical)"
+            sgdisk --zap-all "$header_disk" &>> "$LOG_FILE" || log_debug "sgdisk --zap-all $header_disk failed (non-critical)"
 
-        local p_prefix=""
-        [[ "$header_disk" == /dev/nvme* ]] && p_prefix="p"
-        CONFIG_VARS[HEADER_PART]="${header_disk}${p_prefix}1"
-        log_debug "Header partition set to: ${CONFIG_VARS[HEADER_PART]}"
-        log_debug "Formatting header partition ${CONFIG_VARS[HEADER_PART]} as ext4 with label LUKS_HEADERS."
-        mkfs.ext4 -L "LUKS_HEADERS" "${CONFIG_VARS[HEADER_PART]}" &>> "$LOG_FILE"
+            log_debug "Partitioning header disk $header_disk: sgdisk -n 1:0:0 -t 1:8300 -c 1:LUKS-Headers $header_disk"
+            sgdisk -n 1:0:0 -t 1:8300 -c 1:LUKS-Headers "$header_disk" &>> "$LOG_FILE"
+            log_debug "Running partprobe after header disk partitioning."
+            partprobe "$header_disk" &>> "$LOG_FILE" # Target partprobe to specific disk
+            sleep 2
+
+            local p_prefix=""
+            [[ "$header_disk" == /dev/nvme* ]] && p_prefix="p"
+            CONFIG_VARS[HEADER_PART]="${header_disk}${p_prefix}1"
+            log_debug "Header partition set to newly created: ${CONFIG_VARS[HEADER_PART]}"
+
+            log_debug "Formatting header partition ${CONFIG_VARS[HEADER_PART]} as ext4 with label LUKS_HEADERS."
+            mkfs.ext4 -L "LUKS_HEADERS" "${CONFIG_VARS[HEADER_PART]}" &>> "$LOG_FILE"
+            show_success "Header disk $header_disk formatted and partition ${CONFIG_VARS[HEADER_PART]} created."
+        else
+            log_debug "Using existing partition for LUKS headers: ${CONFIG_VARS[HEADER_PART_DEVICE]}"
+            CONFIG_VARS[HEADER_PART]="${CONFIG_VARS[HEADER_PART_DEVICE]}"
+
+            show_progress "Validating existing header partition: ${CONFIG_VARS[HEADER_PART]}..."
+            if [[ ! -b "${CONFIG_VARS[HEADER_PART]}" ]]; then
+                log_error "CRITICAL: User-specified header partition ${CONFIG_VARS[HEADER_PART]} does not exist."
+                show_error "Error: Header partition ${CONFIG_VARS[HEADER_PART]} not found!"
+                show_error "Please check your configuration and ensure the device path is correct."
+                exit 1
+            fi
+            log_debug "User-specified header partition ${CONFIG_VARS[HEADER_PART]} exists."
+
+            local existing_fstype
+            existing_fstype=$(blkid -p "${CONFIG_VARS[HEADER_PART]}" -s TYPE -o value 2>/dev/null)
+            log_debug "Detected filesystem type on ${CONFIG_VARS[HEADER_PART]}: '${existing_fstype}'"
+
+            # Allow ext2/3/4 or vfat. If blank, it's unformatted or unknown.
+            if [[ -z "$existing_fstype" ]] || [[ "$existing_fstype" != "ext4" && "$existing_fstype" != "ext3" && "$existing_fstype" != "ext2" && "$existing_fstype" != "vfat" ]]; then
+                log_warning "Warning: Partition ${CONFIG_VARS[HEADER_PART]} is unformatted or has an unexpected filesystem type: ${existing_fstype:-None}."
+                if ! dialog --title "Confirm Header Partition" --yesno "Warning: Partition ${CONFIG_VARS[HEADER_PART]} is unformatted or has an unexpected filesystem type (${existing_fstype:-None}).\n\nThe installer typically uses ext4 for headers if it creates the partition.\n\nContinue using this existing partition anyway?" 12 75; then
+                    log_debug "User chose not to continue with the existing header partition due to fstype warning."
+                    show_error "Header partition usage cancelled by user. Please reconfigure."
+                    exit 1 # Exiting; user should restart or reconfigure.
+                fi
+                log_debug "User confirmed using existing header partition despite fstype warning."
+            else
+                log_debug "Existing header partition ${CONFIG_VARS[HEADER_PART]} has a suitable filesystem type: $existing_fstype."
+            fi
+            show_success "Existing header partition ${CONFIG_VARS[HEADER_PART]} will be used."
+        fi
+
+        # Common logic: Get UUID for the determined header partition
+        log_debug "Retrieving UUID for header partition: ${CONFIG_VARS[HEADER_PART]}"
         CONFIG_VARS[HEADER_PART_UUID]=$(blkid -s UUID -o value "${CONFIG_VARS[HEADER_PART]}" 2>/dev/null)
         log_debug "Header partition UUID: ${CONFIG_VARS[HEADER_PART_UUID]}"
+
         if [[ -z "${CONFIG_VARS[HEADER_PART_UUID]}" ]]; then
-            log_debug "CRITICAL: Failed to retrieve UUID for header partition ${CONFIG_VARS[HEADER_PART]}."
+            log_error "CRITICAL: Failed to retrieve UUID for header partition ${CONFIG_VARS[HEADER_PART]}."
             show_error "CRITICAL: Failed to retrieve UUID for header partition ${CONFIG_VARS[HEADER_PART]}."
             show_error "This UUID is essential for the system to locate detached LUKS headers at boot."
-            show_error "Please check the device and ensure it's correctly partitioned and formatted."
+            show_error "Please check the device ${CONFIG_VARS[HEADER_PART]}. It might be unformatted, have an unsupported filesystem for UUID retrieval, or there could be a blkid issue."
             exit 1
         fi
         show_progress "Header partition ${CONFIG_VARS[HEADER_PART]} has UUID: ${CONFIG_VARS[HEADER_PART_UUID]}"
-        show_success "Header disk prepared."
-        log_debug "Header disk preparation successful."
+        log_debug "Header disk/partition processing successful."
     fi
 
     log_debug "Running partprobe after all initial wiping and potential header disk setup."
