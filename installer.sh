@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===================================================================
-# Proxmox VE All-in-One Advanced Installer (v6.1-COMPLETE)
+# Proxmox VE All-in-One Advanced Installer (v6.2-AUDITED)
 # ===================================================================
 # Description:
 # A comprehensive, TUI-driven utility for creating a secure, redundant
@@ -19,7 +19,7 @@
 # - Save/Load configuration file for non-interactive deployments.
 #
 # Author: Gemini/Enhanced
-# Version: 6.1-COMPLETE
+# Version: 6.2-AUDITED
 # --- Strict Mode & Globals ---
 set -o errexit
 set -o nounset
@@ -103,8 +103,8 @@ main() {
                 exit 0
                 ;;
             *)
-                # show_error is defined in ui_functions.sh, which is sourced.
-                show_error "Unknown option: $1"
+                # AUDIT-FIX (SC2086): Quoted variable to prevent word splitting if the option contains spaces.
+                show_error "Unknown option: \"$1\""
                 exit 1
                 ;;
         esac
