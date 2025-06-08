@@ -1,10 +1,4 @@
-Of course. Here is the modified script that includes an optional step to install the full KDE Plasma desktop environment.
-
-The new section has been added after the Cockpit installation and before the final steps. It uses the same interactive and modular style as the rest of the script.
-
-```bash
 #!/bin/bash
-
 # --- Post-Install Script: PVE Kernel, Cockpit & KDE Desktop ---
 # Run this INSIDE your booted Debian Trixie system.
 
@@ -12,11 +6,11 @@ The new section has been added after the Cockpit installation and before the fin
 set -e # Exit immediately if a command exits with a non-zero status.
 # set -x # Uncomment for debugging
 
-BOLD=$(tput bold)
-NORMAL=$(tput sgr0)
-GREEN=$(tput setaf 2)
-RED=$(tput setaf 1)
-YELLOW=$(tput setaf 3)
+BOLD="$(tput bold)"
+NORMAL="$(tput sgr0)"
+GREEN="$(tput setaf 2)"
+RED="$(tput setaf 1)"
+YELLOW="$(tput setaf 3)"
 
 log_info() {
     echo "${GREEN}${BOLD}[INFO]${NORMAL} $1"
@@ -97,7 +91,7 @@ log_warn "This may install a new kernel and related packages."
 PACKAGES_PVE="proxmox-kernel-6.5 pve-headers-6.5 qemu-server proxmox-backup-client"
 
 if ask_yes_no "Install Proxmox VE kernel (6.5) and common tools?"; then
-    if apt install --yes ${PACKAGES_PVE}; then
+    if apt install --yes "${PACKAGES_PVE}"; then
         log_info "Proxmox VE packages installed."
     else
         log_error "Failed to install Proxmox VE packages. Please check errors."
@@ -113,11 +107,11 @@ PACKAGES_COCKPIT="cockpit cockpit-storaged cockpit-networkmanager cockpit-packag
 PACKAGES_COCKPIT_ZFS="cockpit-zfs-manager"
 
 if ask_yes_no "Install Cockpit and common modules?"; then
-    if apt install --yes ${PACKAGES_COCKPIT}; then
+    if apt install --yes "${PACKAGES_COCKPIT}"; then
         log_info "Cockpit and common modules installed."
 
         if ask_yes_no "Attempt to install 'cockpit-zfs-manager'? (May not be available)"; then
-            if apt install --yes ${PACKAGES_COCKPIT_ZFS}; then
+            if apt install --yes "${PACKAGES_COCKPIT_ZFS}"; then
                 log_info "'cockpit-zfs-manager' installed."
             else
                 log_warn "'cockpit-zfs-manager' failed to install. It might not be available in your configured repositories."
@@ -127,7 +121,7 @@ if ask_yes_no "Install Cockpit and common modules?"; then
         log_info "Enabling and starting Cockpit socket..."
         systemctl enable --now cockpit.socket
         systemctl status cockpit.socket
-        log_info "Cockpit should be accessible at https://$(hostname -I | awk '{print $1}'):9090"
+        log_info "Cockpit should be accessible at https://$(hostname -I | awk '{print $1}')":9090
 
     else
         log_error "Failed to install Cockpit packages. Please check errors."
@@ -144,7 +138,7 @@ if ask_yes_no "Install KDE Plasma Desktop Environment? (This will install a full
     # task-kde-desktop is the recommended meta-package for a full KDE experience
     PACKAGES_KDE="task-kde-desktop"
 
-    if apt install --yes ${PACKAGES_KDE}; then
+    if apt install --yes "${PACKAGES_KDE}"; then
         log_info "KDE Plasma Desktop installed successfully."
         # The task-kde-desktop should configure the display manager, but we can ensure it's enabled.
         # SDDM is the default display manager for KDE.
@@ -183,5 +177,4 @@ else
     log_info "Please reboot manually when ready."
 fi
 
-exit 0
-```
+exit 
