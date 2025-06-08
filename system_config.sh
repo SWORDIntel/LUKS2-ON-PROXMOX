@@ -5,509 +5,216 @@ install_base_system() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     show_step "DEBIAN" "Installing Base System"
 
-    show_progress "Mounting boot partitions..."
-    log_debug "Creating /mnt/boot and /mnt/boot/efi directories."
-    mkdir -p /mnt/boot
+    # Mounting is already solid.
     mkdir -p /mnt/boot/efi
-
-    log_debug "Mounting boot partition ${CONFIG_VARS[BOOT_PART]} on /mnt/boot."
-    if ! mount "${CONFIG_VARS[BOOT_PART]}" /mnt/boot &>> "$LOG_FILE"; then
-        log_debug "Failed to mount boot partition ${CONFIG_VARS[BOOT_PART]} on /mnt/boot."
-        show_error "Failed to mount boot partition ${CONFIG_VARS[BOOT_PART]} on /mnt/boot"
-        exit 1
-    fi
-    log_debug "Boot partition mounted successfully."
-
-    log_debug "Mounting EFI partition ${CONFIG_VARS[EFI_PART]} on /mnt/boot/efi."
-    if ! mount "${CONFIG_VARS[EFI_PART]}" /mnt/boot/efi &>> "$LOG_FILE"; then
-        log_debug "Failed to mount EFI partition ${CONFIG_VARS[EFI_PART]} on /mnt/boot/efi."
-        show_error "Failed to mount EFI partition ${CONFIG_VARS[EFI_PART]} on /mnt/boot/efi"
-        exit 1
-    fi
-    log_debug "EFI partition mounted successfully."
+    mount "${CONFIG_VARS[BOOT_PART]}" /mnt/boot &>> "$LOG_FILE" || { show_error "Failed to mount boot partition."; exit 1; }
+    mount "${CONFIG_VARS[EFI_PART]}" /mnt/boot/efi &>> "$LOG_FILE" || { show_error "Failed to mount EFI partition."; exit 1; }
+    show_success "Boot and EFI partitions mounted."
 
     show_progress "Installing Debian base system (this will take several minutes)..."
     local debian_release="bookworm"
     local debian_mirror="http://deb.debian.org/debian"
-    log_debug "Debian release: $debian_release, Mirror: $debian_mirror"
 
-    # Log debootstrap output for debugging
-    # The main LOG_FILE is now in the script directory, not TEMP_DIR.
-    # We can create a separate debootstrap log in TEMP_DIR if desired, or just append to main.
-    # For simplicity and centralization, appending to main LOG_FILE.
+    # debootstrap logic is good, keeping it.
     log_debug "Starting debootstrap..."
     echo "--- Debootstrap Output Start ---" >> "$LOG_FILE"
-    if ! debootstrap --arch=amd64 --include=locales,vim,openssh-server,wget,curl \
-        "$debian_release" /mnt "$debian_mirror" >> "$LOG_FILE" 2>&1; then
+    debootstrap --arch=amd64 --include=locales,vim,openssh-server,wget,curl,ca-certificates \
+        "$debian_release" /mnt "$debian_mirror" >> "$LOG_FILE" 2>&1
+    if [[ $? -ne 0 ]]; then
         echo "--- Debootstrap Output End ---" >> "$LOG_FILE"
-        log_debug "Debootstrap failed. Base system installation could not complete."
-        show_error "Debootstrap failed. Base system installation could not complete."
-        show_error "Check $LOG_FILE for debootstrap output details."
+        show_error "Debootstrap failed. Check $LOG_FILE for details."
         exit 1
     fi
     echo "--- Debootstrap Output End ---" >> "$LOG_FILE"
-    log_debug "Debootstrap successful."
-    show_success "Base system installed (debootstrap successful)."
+    show_success "Base system installed."
 
-    log_debug "Copying main log file to /mnt/var/log/proxmox-install.log"
-    cp "$LOG_FILE" /mnt/var/log/proxmox-install.log
-    # No longer a separate debootstrap_log to copy, it's part of the main LOG_FILE.
+    log_debug "Copying installer log to target system."
+    mkdir -p /mnt/var/log
+    cp "$LOG_FILE" /mnt/var/log/proxmox-installer-aio.log
     log_debug "Exiting function: ${FUNCNAME[0]}"
 }
+
+# ANNOTATION: Encapsulate chroot mount/unmount logic for robustness and reuse.
+_chroot_mounts() {
+    log_debug "Mounting chroot pseudo-filesystems..."
+    mount --make-rslave --rbind /dev /mnt/dev
+    mount --make-rslave --rbind /proc /mnt/proc
+    mount --make-rslave --rbind /sys /mnt/sys
+    # Copy resolv.conf after mounts to ensure it's not a symlink to a non-existent path.
+    cp /etc/resolv.conf /mnt/etc/
+}
+
+_chroot_unmounts() {
+    log_debug "Unmounting chroot pseudo-filesystems..."
+    # Unmount in reverse order, using -l for lazy unmount as a fallback.
+    umount -R -l /mnt/dev &>> "$LOG_FILE"
+    umount -R -l /mnt/sys &>> "$LOG_FILE"
+    umount -R -l /mnt/proc &>> "$LOG_FILE"
+}
+
 
 configure_new_system() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     show_step "CHROOT" "Configuring System"
 
-    show_progress "Preparing chroot environment..."
-    log_debug "Copying /etc/resolv.conf to /mnt/etc/resolv.conf"
-    cp /etc/resolv.conf /mnt/etc/ &>> "$LOG_FILE"
+    _chroot_mounts
 
-    log_debug "Mounting /proc, /sys, /dev, /dev/pts for chroot."
-    if ! mount -t proc /proc /mnt/proc &>> "$LOG_FILE"; then
-        log_debug "Failed to mount /proc into chroot environment at /mnt/proc."
-        show_error "Failed to mount /proc into chroot environment at /mnt/proc"
-        exit 1
-    fi
-    if ! mount -t sysfs /sys /mnt/sys &>> "$LOG_FILE"; then
-        log_debug "Failed to mount /sys into chroot environment at /mnt/sys."
-        show_error "Failed to mount /sys into chroot environment at /mnt/sys"
-        exit 1
-    fi
-    if ! mount -t devtmpfs /dev /mnt/dev &>> "$LOG_FILE"; then
-        log_debug "Failed to mount /dev into chroot environment at /mnt/dev."
-        show_error "Failed to mount /dev into chroot environment at /mnt/dev"
-        exit 1
-    fi
-    if ! mount -t devpts /dev/pts /mnt/dev/pts &>> "$LOG_FILE"; then
-        log_debug "Failed to mount /dev/pts into chroot environment at /mnt/dev/pts."
-        show_error "Failed to mount /dev/pts into chroot environment at /mnt/dev/pts"
-        exit 1
-    fi
-    log_debug "Chroot mounts prepared successfully."
-
-    log_debug "Prompting for root password for the new system."
-    local root_pass
-    root_pass=$(dialog --title "Root Password" --passwordbox "Enter root password for new system:" 10 60 3>&1 1>&2 2>&3) || { log_debug "Root password entry cancelled."; exit 1; }
-    local root_pass_confirm
-    root_pass_confirm=$(dialog --title "Root Password" --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3) || { log_debug "Root password confirmation cancelled."; exit 1; }
-
+    # Get root password. Logic is good.
+    local root_pass root_pass_confirm
+    root_pass=$(dialog --title "Root Password" --passwordbox "Enter root password for new system:" 10 60 3>&1 1>&2 2>&3) || exit 1
+    root_pass_confirm=$(dialog --title "Root Password" --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3) || exit 1
     if [[ "$root_pass" != "$root_pass_confirm" ]] || [[ -z "$root_pass" ]]; then
-        log_debug "Root passwords do not match or are empty."
-        show_error "Passwords do not match or are empty."
-        exit 1
+        show_error "Passwords do not match or are empty." && exit 1
     fi
-    log_debug "Root password confirmed (not logging password itself)."
 
-    log_debug "Creating chroot configuration script at /mnt/tmp/configure.sh"
-    cat > /mnt/tmp/configure.sh <<- 'CHROOT_SCRIPT'
+    # ANNOTATION: Create a self-contained chroot script. This is more robust than exporting variables.
+    # We use placeholders like @@HOSTNAME@@ that we will replace with `sed`.
+    log_debug "Creating chroot configuration script template."
+    cat > /mnt/tmp/configure.sh.tpl <<- 'CHROOT_SCRIPT_TPL'
         #!/bin/bash
-        set -e
+        set -ex # Exit on error and print commands
 
-        echo "${HOSTNAME}" > /etc/hostname
+        # --- Basic System Setup ---
+        echo "@@HOSTNAME@@" > /etc/hostname
         cat > /etc/hosts << EOF
 127.0.0.1       localhost
-127.0.1.1       ${HOSTNAME}.localdomain ${HOSTNAME}
-
-# IPv6
+127.0.1.1       @@HOSTNAME@@.localdomain @@HOSTNAME@@
 ::1             localhost ip6-localhost ip6-loopback
 ff02::1         ip6-allnodes
 ff02::2         ip6-allrouters
 EOF
-
         echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
         locale-gen
-        echo "LANG=en_US.UTF-8" > /etc/locale.conf
-
         ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 
+        # --- APT and Proxmox Repos ---
         cat > /etc/apt/sources.list << EOF
 deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
-
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-deb-src http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-
 deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
+EOF
+        wget -q -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg http://download.proxmox.com/debian/proxmox-release-bookworm.gpg
+        echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-install-repo.list
+        
+        # --- Package Installation ---
+        apt-get update
+        export DEBIAN_FRONTEND=noninteractive
+
+        # ANNOTATION: Simplified package installation. One command handles all cases.
+        PACKAGES="proxmox-ve postfix open-iscsi zfs-initramfs cryptsetup-initramfs bridge-utils ifupdown2 linux-image-amd64 linux-headers-amd64"
+        if [ "@@GRUB_MODE@@" == "UEFI" ]; then
+            PACKAGES+=" grub-efi-amd64 efibootmgr"
+        else
+            PACKAGES+=" grub-pc"
+        fi
+        if [ "@@USE_YUBIKEY@@" == "yes" ]; then
+            PACKAGES+=" yubikey-luks libpam-yubico pcscd"
+            systemctl enable pcscd
+        fi
+        apt-get install -y --no-install-recommends $PACKAGES
+
+        # --- Network Configuration ---
+        cat > /etc/network/interfaces << EOF
+@@NETWORK_CONFIG@@
 EOF
 
-        wget -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg \
-            http://download.proxmox.com/debian/proxmox-release-bookworm.gpg
+        # --- fstab and crypttab ---
+        echo "@@FSTAB_CONFIG@@" > /etc/fstab
+        echo "@@CRYPMTAB_CONFIG@@" > /etc/crypttab
 
-        echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > \
-            /etc/apt/sources.list.d/pve-no-subscription.list
-
-        log_debug "=== PACKAGE INSTALLATION DEBUG: Running apt-get update ==="
-        apt-get update -y &>> "$LOG_FILE"
-        log_debug "=== PACKAGE INSTALLATION DEBUG: apt-get update completed with status $? ==="
-
-        # Install core packages first
-        log_debug "=== PACKAGE INSTALLATION DEBUG: Installing essential packages ==="
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            linux-image-amd64 linux-headers-amd64 \
-            zfs-initramfs cryptsetup-initramfs \
-            bridge-utils ifupdown2
-
-        # Conditional GRUB installation
-        _GRUB_MODE="${BOOT_MODE}" # BOOT_MODE is exported from the main script
-        _PRIMARY_DISK="${PVE_PRIMARY_TARGET_DISK}" # Exported from the main script
-
-        echo "[PROXMOX_AIO_INSTALLER_CHROOT] Detected BOOT_MODE: ${_GRUB_MODE}" >> /dev/kmsg
-        echo "[PROXMOX_AIO_INSTALLER_CHROOT] Primary target disk for GRUB (BIOS): ${_PRIMARY_DISK}" >> /dev/kmsg
-
-        if [[ "${_GRUB_MODE}" == "UEFI" ]]; then
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Installing UEFI GRUB packages..." >> /dev/kmsg
-            log_debug "=== PACKAGE INSTALLATION DEBUG: Installing EFI bootloader packages ==="
-            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-efi-amd64 efibootmgr &>> "$LOG_FILE"
-            log_debug "=== PACKAGE INSTALLATION DEBUG: EFI bootloader packages installation completed with status $? ==="
-        elif [[ "${_GRUB_MODE}" == "BIOS" ]]; then
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Installing BIOS GRUB packages..." >> /dev/kmsg
-            log_debug "=== PACKAGE INSTALLATION DEBUG: Installing BIOS bootloader packages ==="
-            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-pc &>> "$LOG_FILE"
-            log_debug "=== PACKAGE INSTALLATION DEBUG: BIOS bootloader packages installation completed with status $? ==="
-        else
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] ERROR: Unknown BOOT_MODE: ${_GRUB_MODE}. Cannot install GRUB." >> /dev/kmsg
-            exit 1 # Critical error
-        fi
-
-        echo "[PROXMOX_AIO_INSTALLER_CHROOT] Checking and installing YubiKey packages..." >> /dev/kmsg
-        if [[ "${USE_YUBIKEY}" == "yes" ]]; then
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] USE_YUBIKEY=yes. Installing yubikey-luks and dependencies." >> /dev/kmsg
-            log_debug "=== PACKAGE INSTALLATION DEBUG: Installing Yubikey packages ==="
-            log_debug "Installing YubiKey packages with all required dependencies"
-            # First try installing just yubikey-luks which is the core requirement
-            log_debug "=== PACKAGE INSTALLATION DEBUG: Attempting to install core yubikey-luks package ==="
-            if ! DEBIAN_FRONTEND=noninteractive apt-get install -y yubikey-luks &>> "$LOG_FILE"; then
-                log_debug "=== PACKAGE INSTALLATION DEBUG: Core yubikey-luks installation failed, trying with locally downloaded packages ==="
-                # Try to find and install the downloaded package directly
-                if [ -f "/debs/yubikey-luks_*.deb" ]; then
-                    log_debug "=== PACKAGE INSTALLATION DEBUG: Installing yubikey-luks from local deb ==="
-                    dpkg -i /debs/yubikey-luks_*.deb &>> "$LOG_FILE" || log_debug "Local yubikey-luks deb installation failed"
-                fi
-            fi
-            
-            # Verify if yubikey-luks-enroll is available after core package installation
-            if ! command -v yubikey-luks-enroll &>/dev/null; then
-                log_debug "=== PACKAGE INSTALLATION DEBUG: yubikey-luks-enroll command not available after core package, trying to install all dependencies ==="
-                # Try installing all dependencies if core package didn't provide yubikey-luks-enroll
-                if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                    yubikey-luks cryptsetup-run \
-                    yubikey-manager python3-ykman python3-click python3-cryptography python3-fido2 \
-                    yubikey-personalization libyubikey-udev \
-                    libpam-yubico ykcs11 libykpers-1-1 libyubikey0 pcscd &>> "$LOG_FILE"; then
-                    log_debug "=== PACKAGE INSTALLATION DEBUG: Complete Yubikey packages installation FAILED with status $? ==="
-                    echo "[PROXMOX_AIO_INSTALLER_CHROOT] WARNING: Failed to install all YubiKey packages. YubiKey support may be limited." >> /dev/kmsg
-                    # We'll continue but warn the user later if yubikey-luks-enroll is still missing
-                fi
-            fi
-            
-            # Final verification of critical command
-            if ! command -v yubikey-luks-enroll &>/dev/null; then
-                log_debug "=== PACKAGE INSTALLATION DEBUG: yubikey-luks-enroll STILL not available after all attempts ==="
-                echo "[PROXMOX_AIO_INSTALLER_CHROOT] CRITICAL: yubikey-luks-enroll command not available. YubiKey setup will not work." >> /dev/kmsg
-                # Setting a flag to inform the user later, but not exiting as this is not fatal for the whole system
-                export YUBIKEY_SETUP_FAILED=true
-            fi
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] YubiKey packages installed successfully. Enabling pcscd service." >> /dev/kmsg
-            if ! systemctl enable pcscd; then
-                echo "[PROXMOX_AIO_INSTALLER_CHROOT] WARNING: Failed to enable pcscd service. YubiKey might not work on boot." >> /dev/kmsg
-                # Decide if this should also be fatal. For now, make it a warning.
-            fi
-        else
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] USE_YUBIKEY=no. Skipping YubiKey package installation." >> /dev/kmsg
-        fi
-
-        if [[ "${NET_USE_DHCP}" == "yes" ]]; then
-            cat > /etc/network/interfaces << EOF
-auto lo
-iface lo inet loopback
-
-auto ${NET_IFACE}
-iface ${NET_IFACE} inet dhcp
-
-auto vmbr0
-iface vmbr0 inet dhcp
-    bridge-ports ${NET_IFACE}
-    bridge-stp off
-    bridge-fd 0
-EOF
-        else
-            if [[ -L "/etc/resolv.conf" ]]; then
-                echo "Warning: /etc/resolv.conf is a symlink. Attempting to write DNS configuration." >&2
-                if ! echo "nameserver ${NET_DNS// /$'\n'nameserver }" > /etc/resolv.conf; then
-                    echo "Error: Failed to write to /etc/resolv.conf (symlink target likely not writable)." >&2
-                fi
-            elif [[ ! -w "/etc/resolv.conf" ]]; then
-                echo "Error: /etc/resolv.conf is not writable. Cannot configure DNS automatically." >&2
-            else
-                echo "nameserver ${NET_DNS// /$'\n'nameserver }" > /etc/resolv.conf
-            fi
-
-            cat > /etc/network/interfaces << EOF
-auto lo
-iface lo inet loopback
-
-auto ${NET_IFACE}
-iface ${NET_IFACE} inet manual
-
-auto vmbr0
-iface vmbr0 inet static
-    address ${NET_IP_CIDR}
-    gateway ${NET_GATEWAY}
-    bridge-ports ${NET_IFACE}
-    bridge-stp off
-    bridge-fd 0
-EOF
-        fi
-
-        local crypttab_options="luks,discard"
-        if [[ "${USE_YUBIKEY}" == "yes" ]]; then
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] YubiKey is enabled, adding keyscript to crypttab options." >> /dev/kmsg
-            crypttab_options+=",keyscript=/usr/share/yubikey-luks/ykluks-keyscript"
-        fi
-        echo "[PROXMOX_AIO_INSTALLER_CHROOT] crypttab_options set to: $crypttab_options" >> /dev/kmsg
-
-        if [[ "${USE_DETACHED_HEADERS}" == "yes" ]]; then
-            echo "# Detached header configuration" > /etc/crypttab
-            local header_files_arr=()
-            read -r -a header_files_arr <<< "${HEADER_FILENAMES_ON_PART}"
-            local luks_parts_arr=()
-            read -r -a luks_parts_arr <<< "${LUKS_PARTITIONS}"
-            for i in "${!luks_parts_arr[@]}"; do
-                local uuid
-                uuid=$(blkid -s UUID -o value "${luks_parts_arr[$i]}")
-                if [[ -z "${HEADER_PART_UUID}" ]]; then
-                    echo "Critical error: HEADER_PART_UUID is not set in chroot for detached headers." >&2
-                    exit 1
-                fi
-                echo "${LUKS_MAPPER_NAME}_$i UUID=$uuid none $crypttab_options,header=UUID=${HEADER_PART_UUID}:${header_files_arr[$i]}" >> /etc/crypttab
-            done
-        else
-            echo "# Standard LUKS configuration" > /etc/crypttab
-            local luks_parts_arr=()
-            read -r -a luks_parts_arr <<< "${LUKS_PARTITIONS}"
-            for i in "${!luks_parts_arr[@]}"; do
-                local uuid
-                uuid=$(blkid -s UUID -o value "${luks_parts_arr[$i]}")
-                echo "${LUKS_MAPPER_NAME}_$i UUID=$uuid none $crypttab_options" >> /etc/crypttab
-            done
-        fi
-
-        echo "# /etc/fstab: static file system information." > /etc/fstab
-        local boot_uuid
-        boot_uuid=$(blkid -s UUID -o value "${BOOT_PART}")
-        echo "UUID=$boot_uuid /boot ext4 defaults 0 2" >> /etc/fstab
-        local efi_uuid
-        efi_uuid=$(blkid -s UUID -o value "${EFI_PART}")
-        if [[ "${_GRUB_MODE}" == "UEFI" ]]; then
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Adding /boot/efi to fstab for UEFI mode." >> /dev/kmsg
-            echo "UUID=$efi_uuid /boot/efi vfat umask=0077 0 1" >> /etc/fstab
-        else
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Skipping /boot/efi in fstab for BIOS mode." >> /dev/kmsg
-        fi
-
-        echo "[PROXMOX_AIO_INSTALLER_CHROOT] Updating initramfs after potential YubiKey configuration..." >> /dev/kmsg
-        update-initramfs -c -k all
-
-        if [[ "${_GRUB_MODE}" == "UEFI" ]]; then
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Running grub-install for UEFI..." >> /dev/kmsg
+        # --- Bootloader Installation ---
+        update-initramfs -u -k all
+        if [ "@@GRUB_MODE@@" == "UEFI" ]; then
             grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=proxmox --recheck
-        elif [[ "${_GRUB_MODE}" == "BIOS" ]]; then
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] Running grub-install for BIOS on ${_PRIMARY_DISK}..." >> /dev/kmsg
-            if [[ -z "${_PRIMARY_DISK}" ]]; then
-                echo "[PROXMOX_AIO_INSTALLER_CHROOT] ERROR: PVE_PRIMARY_TARGET_DISK is not set for BIOS GRUB install." >> /dev/kmsg
-                exit 1 # Critical error
-            fi
-            grub-install --target=i386-pc --recheck "${_PRIMARY_DISK}"
         else
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] ERROR: Unknown BOOT_MODE: ${_GRUB_MODE}. Cannot run grub-install." >> /dev/kmsg
-            exit 1 # Critical error
+            grub-install --target=i386-pc --recheck "@@PRIMARY_DISK@@"
         fi
         update-grub
 
-        echo "root:${ROOT_PASSWORD}" | chpasswd
-
-        log_debug "=== PACKAGE INSTALLATION DEBUG: Installing Proxmox VE and related packages ==="
-        DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi &>> "$LOG_FILE"
-        log_debug "=== PACKAGE INSTALLATION DEBUG: Proxmox VE packages installation completed with status $? ==="
-
-        # Remove enterprise repository files
+        # --- Final System Config ---
+        echo "root:@@ROOT_PASSWORD@@" | chpasswd
         rm -f /etc/apt/sources.list.d/pve-enterprise.list
-        
-        # Replace enterprise Ceph repo with non-enterprise one if it exists
-        if [[ -f /etc/apt/sources.list.d/ceph.list ]]; then
-            log_debug "Enterprise Ceph repository found, replacing with non-enterprise repo"
-            echo "deb http://download.proxmox.com/debian/ceph-quincy bookworm no-subscription" > /etc/apt/sources.list.d/ceph.list
-            log_debug "Ceph repository updated to use non-enterprise version"
-        fi
-        
-        # Also check for alternative ceph conf location
-        if [[ -f /etc/apt/sources.list.d/ceph.conf ]]; then
-            log_debug "Enterprise Ceph config found, replacing with non-enterprise repo"
-            echo "deb http://download.proxmox.com/debian/ceph-quincy bookworm no-subscription" > /etc/apt/sources.list.d/ceph.conf
-            log_debug "Ceph configuration updated to use non-enterprise version"
-        fi
-        
-        # Skip explicit ZFS package installation as Proxmox already includes ZFS support
-        log_debug "=== PACKAGE INSTALLATION DEBUG: Skipping explicit ZFS package installation (using Proxmox native ZFS) ==="
-        # Verify ZFS is available
-        if command -v zpool &>/dev/null && command -v zfs &>/dev/null; then
-            log_debug "=== PACKAGE INSTALLATION DEBUG: ZFS commands (zpool/zfs) are already available ==="
-        else
-            log_debug "=== PACKAGE INSTALLATION WARNING: ZFS commands not found, attempting minimal installation ==="
-            # Only install the basic zfsutils if really needed - should be rare with Proxmox
-            DEBIAN_FRONTEND=noninteractive apt-get install -y zfsutils-linux &>> "$LOG_FILE"
-        fi
-
         systemctl enable ssh
+        apt-get clean
+CHROOT_SCRIPT_TPL
 
-        log_debug "=== PACKAGE INSTALLATION DEBUG: Running apt-get clean ==="
-        apt-get clean &>> "$LOG_FILE"
-        log_debug "=== PACKAGE INSTALLATION DEBUG: apt-get clean completed with status $? ==="
+    # ANNOTATION: Prepare configuration strings to inject into the template.
+    # This keeps complex logic in the main script, not the chroot script.
+    
+    # Network Config
+    local net_config=""
+    if [[ "${CONFIG_VARS[NET_USE_DHCP]}" == "yes" ]]; then
+        net_config="auto lo\niface lo inet loopback\n\nauto ${CONFIG_VARS[NET_IFACE]}\niface ${CONFIG_VARS[NET_IFACE]} inet dhcp"
+    else
+        net_config="auto lo\niface lo inet loopback\n\nauto ${CONFIG_VARS[NET_IFACE]}\niface ${CONFIG_VARS[NET_IFACE]} inet manual\n\n"
+        net_config+="auto vmbr0\niface vmbr0 inet static\n    address ${CONFIG_VARS[NET_IP_CIDR]}\n    gateway ${CONFIG_VARS[NET_GATEWAY]}\n    bridge-ports ${CONFIG_VARS[NET_IFACE]}\n    bridge-stp off\n    bridge-fd 0"
+        echo "nameserver ${CONFIG_VARS[NET_DNS]// /$'\n'nameserver }" > /mnt/etc/resolv.conf
+    fi
 
-CHROOT_SCRIPT
+    # Fstab and Crypttab Config
+    local fstab_config="# /etc/fstab\nUUID=$(blkid -s UUID -o value "${CONFIG_VARS[BOOT_PART]}") /boot ext4 defaults 0 2\n"
+    if [[ "${CONFIG_VARS[EFFECTIVE_GRUB_MODE]}" == "UEFI" ]]; then
+        fstab_config+="UUID=$(blkid -s UUID -o value "${CONFIG_VARS[EFI_PART]}") /boot/efi vfat umask=0077 0 1"
+    fi
 
+    local crypttab_opts="luks,discard"
+    [[ "${CONFIG_VARS[USE_YUBIKEY]:-no}" == "yes" ]] && crypttab_opts+=",keyscript=/usr/share/yubikey-luks/ykluks-keyscript"
+    local crypttab_config=""
+    local luks_partitions_arr=(); read -r -a luks_partitions_arr <<< "${CONFIG_VARS[LUKS_PARTITIONS]}"
+    if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]}" == "yes" ]]; then
+        local header_files_arr=(); read -r -a header_files_arr <<< "${CONFIG_VARS[HEADER_FILENAMES_ON_PART]}"
+        for i in "${!luks_partitions_arr[@]}"; do
+            local part_uuid=$(blkid -s UUID -o value "${luks_partitions_arr[$i]}")
+            crypttab_config+="${CONFIG_VARS[LUKS_MAPPER_NAME]}_$i UUID=$part_uuid none $crypttab_opts,header=UUID=${CONFIG_VARS[HEADER_PART_UUID]}:${header_files_arr[$i]}\n"
+        done
+    else
+        for i in "${!luks_partitions_arr[@]}"; do
+            local part_uuid=$(blkid -s UUID -o value "${luks_partitions_arr[$i]}")
+            crypttab_config+="${CONFIG_VARS[LUKS_MAPPER_NAME]}_$i UUID=$part_uuid none $crypttab_opts\n"
+        done
+    fi
+
+    local primary_disk_for_grub; read -r primary_disk_for_grub _ <<< "${CONFIG_VARS[ZFS_TARGET_DISKS]}"
+
+    # ANNOTATION: Use `sed` to create the final, self-contained chroot script.
+    sed -e "s|@@HOSTNAME@@|${CONFIG_VARS[HOSTNAME]}|g" \
+        -e "s|@@ROOT_PASSWORD@@|${root_pass}|g" \
+        -e "s|@@NETWORK_CONFIG@@|${net_config}|g" \
+        -e "s|@@FSTAB_CONFIG@@|${fstab_config}|g" \
+        -e "s|@@CRYPMTAB_CONFIG@@|${crypttab_config}|g" \
+        -e "s|@@GRUB_MODE@@|${CONFIG_VARS[EFFECTIVE_GRUB_MODE]}|g" \
+        -e "s|@@PRIMARY_DISK@@|${primary_disk_for_grub}|g" \
+        -e "s|@@USE_YUBIKEY@@|${CONFIG_VARS[USE_YUBIKEY]:-no}|g" \
+        /mnt/tmp/configure.sh.tpl > /mnt/tmp/configure.sh
     chmod +x /mnt/tmp/configure.sh
-    log_debug "Chroot configuration script created and made executable."
-
-    log_debug "Exporting variables for chroot script:"
-    log_debug "  HOSTNAME=${CONFIG_VARS[HOSTNAME]}"
-    log_debug "  NET_USE_DHCP=${CONFIG_VARS[NET_USE_DHCP]:-no}"
-    export HOSTNAME="${CONFIG_VARS[HOSTNAME]}"
-    export NET_USE_DHCP="${CONFIG_VARS[NET_USE_DHCP]:-no}"
-    export NET_IFACE="${CONFIG_VARS[NET_IFACE]:-ens18}"
-    log_debug "  NET_IFACE=${CONFIG_VARS[NET_IFACE]:-ens18}"
-    export NET_IP_CIDR="${CONFIG_VARS[NET_IP_CIDR]:-}"
-    log_debug "  NET_IP_CIDR=${CONFIG_VARS[NET_IP_CIDR]:-}"
-    export NET_GATEWAY="${CONFIG_VARS[NET_GATEWAY]:-}"
-    log_debug "  NET_GATEWAY=${CONFIG_VARS[NET_GATEWAY]:-}"
-    export NET_DNS="${CONFIG_VARS[NET_DNS]:-8.8.8.8 8.8.4.4}"
-    log_debug "  NET_DNS=${CONFIG_VARS[NET_DNS]:-8.8.8.8 8.8.4.4}"
-    export USE_DETACHED_HEADERS="${CONFIG_VARS[USE_DETACHED_HEADERS]}"
-    log_debug "  USE_DETACHED_HEADERS=${CONFIG_VARS[USE_DETACHED_HEADERS]}"
-    export HEADER_PART_UUID="${CONFIG_VARS[HEADER_PART_UUID]:-}"
-    log_debug "  HEADER_PART_UUID=${CONFIG_VARS[HEADER_PART_UUID]:-}"
-    export HEADER_FILENAMES_ON_PART="${CONFIG_VARS[HEADER_FILENAMES_ON_PART]:-}"
-    log_debug "  HEADER_FILENAMES_ON_PART=${CONFIG_VARS[HEADER_FILENAMES_ON_PART]:-}"
-    export LUKS_PARTITIONS="${CONFIG_VARS[LUKS_PARTITIONS]}"
-    log_debug "  LUKS_PARTITIONS=${CONFIG_VARS[LUKS_PARTITIONS]}"
-    export LUKS_MAPPER_NAME="${CONFIG_VARS[LUKS_MAPPER_NAME]}"
-    log_debug "  LUKS_MAPPER_NAME=${CONFIG_VARS[LUKS_MAPPER_NAME]}"
-    export BOOT_PART="${CONFIG_VARS[BOOT_PART]}"
-    log_debug "  BOOT_PART=${CONFIG_VARS[BOOT_PART]}"
-    export EFI_PART="${CONFIG_VARS[EFI_PART]}"
-    log_debug "  EFI_PART=${CONFIG_VARS[EFI_PART]}"
-    export ROOT_PASSWORD="$root_pass" # Not logging password
-    log_debug "  ROOT_PASSWORD has been set (not logged)."
-    export USE_YUBIKEY="${CONFIG_VARS[USE_YUBIKEY]:-no}" # Export USE_YUBIKEY
-    log_debug "  USE_YUBIKEY exported: ${USE_YUBIKEY}"
-    # Export EFFECTIVE_GRUB_MODE as BOOT_MODE for the chroot script's internal logic
-    export BOOT_MODE="${CONFIG_VARS[EFFECTIVE_GRUB_MODE]}"
-    log_debug "  BOOT_MODE exported for chroot (from EFFECTIVE_GRUB_MODE): ${BOOT_MODE}"
-
-    # Determine and export PVE_PRIMARY_TARGET_DISK
-    local primary_disk_for_grub
-    # Read the first disk from the space-separated list in ZFS_TARGET_DISKS
-    read -r primary_disk_for_grub _ <<< "${CONFIG_VARS[ZFS_TARGET_DISKS]}"
-    # Remove partition number if present (e.g. /dev/sda1 -> /dev/sda) for BIOS grub install
-    # This is a basic approach; more robust disk identification might be needed if complex partitioning is involved
-    # However, for ZFS target disks, we typically provide whole disks.
-    # For BIOS GRUB, it's usually installed to the MBR of the disk, not a partition.
-    primary_disk_for_grub=$(echo "$primary_disk_for_grub" | sed 's/[0-9]*$//')
-    export PVE_PRIMARY_TARGET_DISK="$primary_disk_for_grub"
-    log_debug "  PVE_PRIMARY_TARGET_DISK exported: ${PVE_PRIMARY_TARGET_DISK}"
-
+    rm /mnt/tmp/configure.sh.tpl
+    log_debug "Chroot script created and populated."
 
     show_progress "Configuring system in chroot (this will take several minutes)..."
     log_debug "Executing chroot /mnt /tmp/configure.sh"
     echo "--- Chroot Script Output Start ---" >> "$LOG_FILE"
+    # ANNOTATION: Execute the chroot command, capturing all output.
     if ! chroot /mnt /tmp/configure.sh >> "$LOG_FILE" 2>&1; then
         echo "--- Chroot Script Output End ---" >> "$LOG_FILE"
-        log_debug "Chroot script /tmp/configure.sh failed."
-        show_error "System configuration script (/tmp/configure.sh) failed within the chroot environment."
-        show_error "Logs within the chroot (if any) might be in /mnt/var/log or /mnt/tmp. Main log: $LOG_FILE"
+        show_error "System configuration script failed. Check $LOG_FILE for details."
+        _chroot_unmounts # Attempt cleanup even on failure
         exit 1
     fi
     echo "--- Chroot Script Output End ---" >> "$LOG_FILE"
     log_debug "Chroot script executed successfully."
 
-    # SCRIPT_DIR should be available if core_logic.sh is sourced from installer.sh where SCRIPT_DIR is defined.
-    # However, $(dirname "$0") here will refer to ./core_logic.sh which is not what we want.
-    # Using SCRIPT_DIR, assuming it's correctly inherited.
+    # Install local debs if they exist
     local debs_source_dir="$SCRIPT_DIR/debs"
     if [[ -d "$debs_source_dir" ]] && ls "$debs_source_dir"/*.deb &>/dev/null; then
-        log_debug "Local .deb packages found in $debs_source_dir. Installing them in chroot."
         show_progress "Installing local .deb packages..."
-        cp -r "$debs_source_dir" /mnt/tmp/ &>> "$LOG_FILE"
-        log_debug "=== PACKAGE INSTALLATION DEBUG: Installing local .deb packages ==="
-        show_progress "Installing local packages with timeout protection..."
-        
-        # Create a wrapper script with timeout protection
-        cat > /mnt/tmp/install_packages.sh << 'EOL'
-#!/bin/bash
-set -x
-
-# Set environment variables
-export DEBIAN_FRONTEND=noninteractive
-export DEBIAN_PRIORITY=critical
-
-# Try to install packages with timeout
-timeout 300 bash -c 'dpkg -i /tmp/debs/*.deb || apt-get -f install -y'
-DPKG_STATUS=$?
-
-if [ $DPKG_STATUS -eq 124 ] || [ $DPKG_STATUS -eq 143 ]; then
-  echo "WARNING: Package installation timed out after 5 minutes. Attempting to recover..."
-  # Force recovery with dpkg and apt
-  dpkg --configure -a
-  apt-get -f install -y
-  apt-get update -y
-  apt-get -f install -y
-  exit 1
-fi
-
-exit $DPKG_STATUS
-EOL
-
-        # Make the script executable
-        chmod +x /mnt/tmp/install_packages.sh
-        
-        log_debug "Executing install_packages.sh in chroot with timeout protection"
-        echo "--- Chroot dpkg/apt-get Output Start ---" >> "$LOG_FILE"
-        chroot /mnt /tmp/install_packages.sh >> "$LOG_FILE" 2>&1
-        local dpkg_status=$?
-        echo "--- Chroot dpkg/apt-get Output End ---" >> "$LOG_FILE"
-        
-        # Clean up the script
-        rm -f /mnt/tmp/install_packages.sh
-        
-        if [ $dpkg_status -ne 0 ]; then
-            log_debug "=== PACKAGE INSTALLATION DEBUG: Local package installation had issues. Status: $dpkg_status ==="
-            show_warning "Package installation had issues. Attempting to continue..."
-            
-            # Try to repair package system
-            log_debug "Attempting to repair package system in chroot"
-            chroot /mnt bash -c "dpkg --configure -a; apt-get -f install -y" >> "$LOG_FILE" 2>&1
-        else
-            log_debug "=== PACKAGE INSTALLATION DEBUG: Local package installation completed with status: $dpkg_status ==="
-            show_success "Package installation completed successfully"
-        fi
-        rm -rf /mnt/tmp/debs
-        log_debug "Removed /mnt/tmp/debs."
-    else
-        log_debug "No local .deb packages found in $debs_source_dir or directory doesn't exist."
+        mkdir -p /mnt/tmp/local_debs
+        cp "$debs_source_dir"/*.deb /mnt/tmp/local_debs/
+        chroot /mnt apt-get install -y /tmp/local_debs/*.deb >> "$LOG_FILE" 2>&1
+        rm -rf /mnt/tmp/local_debs
     fi
 
-    log_debug "Removing chroot configuration script /mnt/tmp/configure.sh"
     rm /mnt/tmp/configure.sh
-
-    log_debug "Unmounting chroot filesystems: /mnt/dev/pts, /mnt/dev, /mnt/sys, /mnt/proc"
-    umount -lf /mnt/dev/pts &>> "$LOG_FILE" || log_debug "Warning: Failed to unmount /mnt/dev/pts"
-    umount -lf /mnt/dev &>> "$LOG_FILE" || log_debug "Warning: Failed to unmount /mnt/dev"
-    umount -lf /mnt/sys &>> "$LOG_FILE" || log_debug "Warning: Failed to unmount /mnt/sys"
-    umount -lf /mnt/proc &>> "$LOG_FILE" || log_debug "Warning: Failed to unmount /mnt/proc"
-    log_debug "Chroot filesystems unmounted."
-
-    show_success "System configuration complete"
+    _chroot_unmounts
+    show_success "System configuration complete."
     log_debug "Exiting function: ${FUNCNAME[0]}"
 }

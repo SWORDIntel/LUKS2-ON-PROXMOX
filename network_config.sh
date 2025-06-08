@@ -1,376 +1,180 @@
 #!/usr/bin/env bash
 
 #############################################################
-# Network Configuration Functions
+# Network Configuration Functions (Refactored for Robustness)
 #############################################################
 
-# Function to check for basic network connectivity 
-check_basic_connectivity() {
-    log_debug "Entering function: ${FUNCNAME[0]}"
-    if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-        log_debug "Network connectivity available."
-        return 0
-    fi
-    log_debug "No network connectivity detected."
-    return 1
+# ANNOTATION: DRY Principle - This helper function consolidates DNS configuration.
+# Configures system DNS resolvers with reliable public DNS servers.
+_configure_dns() {
+    log_debug "Entering helper function: ${FUNCNAME[0]}"
+    echo "nameserver 1.1.1.1" > /etc/resolv.conf
+    echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+    log_debug "DNS resolvers configured."
 }
 
-# Function to set up minimal networking before RAM pivot
-configure_minimal_network() {
-    log_debug "Entering function: ${FUNCNAME[0]}"
-    show_progress "Setting up minimal network connectivity before RAM pivot..."
-    
-    # Try DHCP first on all interfaces
+# ANNOTATION: DRY Principle - This helper function consolidates the "try DHCP on all interfaces" logic.
+# It is a silent, best-effort attempt to get network connectivity automatically.
+# Returns 0 on success, 1 on failure.
+_try_dhcp_all_interfaces() {
+    log_debug "Entering helper function: ${FUNCNAME[0]}"
+    show_progress "Attempting automatic network configuration (DHCP)..."
+
+    # Get a list of all physical-like interfaces.
     local interfaces
-    interfaces=$(ip -o link show | grep -v lo | awk -F': ' '{print $2}')
-    for interface in $interfaces; do
-        log_debug "Attempting DHCP on interface: $interface"
-        ip link set "$interface" up &>> "$LOG_FILE"
-        timeout 5 dhclient -1 "$interface" &>> "$LOG_FILE" || true
-        
-        # Test if we have connectivity
-        if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-            log_debug "Network connectivity established on $interface via DHCP"
-            show_success "Network connectivity established"
-            # Set basic DNS for package downloads
-            echo "nameserver 1.1.1.1" > /etc/resolv.conf
-            echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-            return 0
+    interfaces=$(ls /sys/class/net | grep -vE '^(lo|docker|veth|virbr|tun|tap)')
+    if [[ -z "$interfaces" ]]; then
+        log_warning "No suitable network interfaces found to attempt DHCP on."
+        return 1
+    fi
+
+    for iface in $interfaces; do
+        log_debug "Attempting DHCP on interface: $iface"
+        ip link set "$iface" up &>> "$LOG_FILE"
+        # Use a timeout to prevent hanging.
+        if timeout 10 dhclient -1 "$iface" &>> "$LOG_FILE"; then
+            # Verify with ping.
+            if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
+                log_info "Network connectivity established on '$iface' via DHCP."
+                return 0 # Success
+            fi
         fi
     done
-    
-    # If DHCP failed, we just set up minimal static config
-    # This is just for downloading packages before RAM pivot
-    # Full network config will happen after RAM pivot
-    log_debug "DHCP failed, setting up minimal static IP"
-    show_warning "DHCP failed, using minimal static networking"
-    
-    local main_interface
-    main_interface=$(ip -o link show | grep -v lo | head -1 | awk -F': ' '{print $2}')
-    if [[ -n "$main_interface" ]]; then
-        ip link set "$main_interface" up &>> "$LOG_FILE"
-        ip addr add "192.168.1.100/24" dev "$main_interface" &>> "$LOG_FILE"
-        ip route add default via "192.168.1.1" dev "$main_interface" &>> "$LOG_FILE"
-        echo "nameserver 1.1.1.1" > /etc/resolv.conf
-        echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-        log_debug "Minimal static network configured on $main_interface"
+
+    log_warning "Automatic DHCP configuration failed on all interfaces."
+    return 1 # Failure
+}
+
+# ANNOTATION: This helper function handles the interactive, manual configuration.
+# It is called only when automated methods fail.
+_configure_network_interactive() {
+    log_debug "Entering helper function: ${FUNCNAME[0]}"
+    show_warning "Automatic network setup failed. Manual configuration is required."
+
+    local iface_options=()
+    while read -r iface; do
+        local status; status=$(ip link show "$iface" 2>/dev/null | grep -q "state UP" && echo "UP" || echo "DOWN")
+        iface_options+=("$iface" "$iface ($status)" "off")
+    done < <(ls /sys/class/net | grep -vE '^(lo|docker|veth|virbr|tun|tap)')
+
+    if [[ ${#iface_options[@]} -eq 0 ]]; then
+        show_error "No network interfaces found to configure." && return 1
+    fi
+
+    local selected_iface
+    selected_iface=$(dialog --title "Network Interface" --radiolist "Select interface to configure:" 15 70 $((${#iface_options[@]}/3)) "${iface_options[@]}" 3>&1 1>&2 2>&3) || return 1
+    log_debug "User selected interface: $selected_iface"
+
+    local ip_addr
+    ip_addr=$(dialog --title "IP Address" --inputbox "Enter IP address with CIDR (e.g., 192.168.1.100/24):" 10 60 "192.168.1.100/24" 3>&1 1>&2 2>&3) || return 1
+    if ! [[ "$ip_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
+        show_error "Invalid IP/CIDR format." && return 1
+    fi
+
+    local gateway
+    gateway=$(dialog --title "Gateway" --inputbox "Enter gateway IP:" 10 60 "192.168.1.1" 3>&1 1>&2 2>&3) || return 1
+    if ! [[ "$gateway" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        show_error "Invalid Gateway IP format." && return 1
+    fi
+
+    # Apply settings
+    ip addr flush dev "$selected_iface" &>> "$LOG_FILE"
+    ip link set "$selected_iface" up &>> "$LOG_FILE"
+    ip addr add "$ip_addr" dev "$selected_iface" &>> "$LOG_FILE"
+    ip route add default via "$gateway" &>> "$LOG_FILE"
+
+    # Configure DNS
+    _configure_dns
+    log_info "Configured static IP on $selected_iface and set DNS."
+
+    # Final verification
+    if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
+        log_info "Manual network configuration successful."
+        return 0
+    else
+        log_error "Manual network configuration failed (ping test failed)."
+        return 1
+    fi
+}
+
+# ANNOTATION: This is the new main entry point function.
+# It orchestrates the process of getting a network connection.
+ensure_network_connectivity() {
+    log_debug "Entering main network orchestrator: ${FUNCNAME[0]}"
+    show_header "NETWORK CONFIGURATION"
+
+    # 1. Check if we already have a connection.
+    if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+        log_info "Network connectivity is already active."
+        show_success "Network connectivity already active."
+        return 0
+    fi
+    show_warning "No active network connection detected."
+
+    # 2. Try the automated DHCP helper.
+    if _try_dhcp_all_interfaces; then
+        # On success, ensure DNS is set and we're done.
+        _configure_dns
+        show_success "Network configured successfully via DHCP."
+        return 0
     fi
     
-    # Don't fail if network isn't available yet - we'll configure properly in RAM
-    log_debug "Exiting function: ${FUNCNAME[0]}"
+    # 3. If automation fails, fall back to the interactive helper.
+    if ! _configure_network_interactive; then
+        # The interactive helper failed or was cancelled by the user.
+        show_error "Failed to configure network. Some features may not work."
+        return 1
+    fi
+
+    show_success "Network configured successfully (manual setup)."
     return 0
 }
 
 # Function to download packages for offline installation
+# ANNOTATION: This function is now simplified, as it can rely on `ensure_network_connectivity`
+# to have already run if an internet connection is required.
 download_offline_packages() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    
-    # Check if we're already running from RAM
-    # shellcheck disable=SC2154 # run_from_ram is set in the main installer.sh
-    if [[ "$run_from_ram" == true ]]; then
-        log_debug "Running from RAM, skipping pre-RAM package downloads"
+
+    # This check is good, if running from RAM we assume this step is complete.
+    if [[ "${run_from_ram:-false}" == true ]]; then
+        log_debug "Running from RAM, skipping pre-RAM package downloads."
         return 0
     fi
     
-    # Check for internet connectivity
-    if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-        log_debug "No internet connectivity for downloading packages"
-        show_warning "No internet connectivity for package downloads. Ensure the 'debs' directory is populated for air-gapped installation."
-        return 0
-    fi
-    
-    log_debug "Internet connection detected for package downloads"
-    show_progress "Internet connection detected for package downloads"
-    
-    # Check if debs directory exists
-    debs_dir="$SCRIPT_DIR/debs"
-    log_debug "Debs directory path: $debs_dir"
-    
-    # Ensure download_debs.sh exists and is executable
-    download_script_path="$SCRIPT_DIR/download_debs.sh"
-    log_debug "Download script path: $download_script_path"
-    
-    if [ ! -f "$download_script_path" ]; then
-        log_debug "download_debs.sh script not found"
-        show_warning "Warning: download_debs.sh script not found. Cannot download .deb packages."
+    # Check for the download script
+    local download_script_path="$SCRIPT_DIR/download_debs.sh"
+    if [[ ! -x "$download_script_path" ]]; then
+        log_warning "download_debs.sh not found or not executable. Cannot download packages."
         return 1
-    elif [ ! -x "$download_script_path" ]; then
-        log_debug "download_debs.sh not executable"
-        chmod +x "$download_script_path" &>> "$LOG_FILE"
-        if [ ! -x "$download_script_path" ]; then
-            show_warning "Warning: download_debs.sh is not executable. Failed to set permissions."
-            return 1
-        fi
-        log_debug "Made download_debs.sh executable"
     fi
     
-    log_debug "download_debs.sh found and is executable"
-    
-    # Check if debs dir is empty
-    proceed_with_download=false
-    if [ ! -d "$debs_dir" ] || [ -z "$(ls -A "$debs_dir" 2>/dev/null)" ]; then
-        log_debug "'debs' directory is missing or empty"
-        proceed_with_download=true
-    else
-        log_debug "'debs' directory already contains files"
-        show_progress "Local 'debs' directory already contains packages"
-    fi
-    
-    if [[ "$proceed_with_download" == true ]]; then
-        if (dialog --title "Download .deb Packages" --yesno "The local 'debs' directory is empty. This installer can download required .deb packages for offline installation. Would you like to download them now?" 12 78); then
-            log_debug "User chose to download .deb packages"
-            show_progress "Downloading packages for offline installation..."
+    local debs_dir="$SCRIPT_DIR/debs"
+    # Prompt the user only if the directory is empty.
+    if [[ ! -d "$debs_dir" ]] || [[ -z "$(ls -A "$debs_dir" 2>/dev/null)" ]]; then
+        if (dialog --title "Download .deb Packages" --yesno "The local 'debs' directory is empty. Would you like to download required packages for a potential offline installation?" 10 78); then
+            # Ensure we have network before attempting download
+            if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+                show_error "No internet connection. Cannot download packages."
+                show_warning "Please run network setup or populate the 'debs' folder manually."
+                return 1
+            fi
             
-            mkdir -p "$debs_dir" &>> "$LOG_FILE"
-            if "$download_script_path"; then
-                log_debug "download_debs.sh script executed successfully"
-                if [ -z "$(ls -A "$debs_dir" 2>/dev/null)" ]; then
-                    log_debug "'debs' directory still empty after download attempt"
-                    show_warning "The 'debs' directory is still empty after download attempt. Check package_urls.txt and internet connection."
-                else
-                    log_debug "'debs' directory populated successfully"
-                    show_success "Packages downloaded successfully for offline installation"
-                fi
-            else
-                log_debug "download_debs.sh script failed with status: $?"
-                show_error "Failed to download packages. Check the logs for details."
+            show_progress "Downloading packages for offline installation..."
+            mkdir -p "$debs_dir"
+            if ! "$download_script_path"; then
+                show_error "Failed to download packages. Check logs and package_urls.txt."
+                return 1
             fi
+            show_success "Packages downloaded successfully to 'debs' directory."
         else
-            log_debug "User skipped .deb package download"
-            show_warning "Skipping package downloads. For air-gapped installations, ensure 'debs' directory is populated manually."
+            show_warning "Skipping package download. For offline use, ensure 'debs' directory is populated."
         fi
+    else
+        show_progress "Local 'debs' directory already contains packages."
     fi
-    
-    # Remind about copying to USB for air-gapped installations
-    dialog --title "Prepare USB Stick" --msgbox "If you intend to run this installer on an air-gapped machine, please ensure you copy the ENTIRE installer directory (including the 'debs' folder) to your USB stick." 10 70
-    
+
+    dialog --title "Air-Gapped Installation" --msgbox "For use on an air-gapped machine, ensure you copy the ENTIRE installer directory (including the 'debs' folder) to your installation media." 10 70
     log_debug "Exiting function: ${FUNCNAME[0]}"
     return 0
-}
-
-# Configure full network in RAM environment
-configure_network_in_ram() {
-    log_debug "Entering function: ${FUNCNAME[0]}"
-    show_header "NETWORK CONFIGURATION"
-    show_step "NETWORK" "Configuring network in RAM environment"
-    
-    # Check if we already have connectivity
-    if check_basic_connectivity; then
-        log_debug "Network already configured and working in RAM environment"
-        show_success "Network connectivity already established in RAM environment"
-        return 0
-    fi
-    
-    # Try DHCP first on all interfaces
-    local interfaces
-    interfaces=$(ip -o link show | grep -v lo | awk -F': ' '{print $2}')
-    log_debug "Available interfaces in RAM: $interfaces"
-    
-    show_progress "Attempting automatic network configuration in RAM..."
-    for interface in $interfaces; do
-        log_debug "Attempting DHCP on interface: $interface"
-        ip link set "$interface" up &>> "$LOG_FILE"
-        timeout 10 dhclient -1 "$interface" &>> "$LOG_FILE" || true
-        
-        # Test if we have connectivity
-        if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-            log_debug "Network connectivity established on $interface via DHCP"
-            show_success "Network connectivity established on $interface"
-            # Set DNS servers
-            echo "nameserver 1.1.1.1" > /etc/resolv.conf
-            echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-            return 0
-        fi
-    done
-    
-    # If automatic config fails, call the full interactive network configuration
-    log_debug "Automatic network configuration failed in RAM, falling back to interactive setup"
-    show_warning "Automatic network configuration failed, manual setup required"
-    configure_network_early
-    
-    log_debug "Exiting function: ${FUNCNAME[0]}"
-    return 0
-}
-
-#############################################################
-# Original Early Network Configuration 
-#############################################################
-configure_network_early() {
-    log_debug "Entering function: ${FUNCNAME[0]}"
-    show_step "NETWORK" "Configuring Network Connection"
-
-    # Check if we already have internet connectivity
-    log_debug "Checking for existing internet connectivity..."
-    if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-        log_debug "Network connectivity already available."
-        show_success "Network connectivity already available"
-        return 0
-    fi
-
-    log_debug "No network connectivity detected. Configuration required."
-    show_warning "No network connectivity detected. Configuration required."
-
-    # Get available interfaces
-    log_debug "Getting available network interfaces..."
-    local ifaces; ifaces=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo" | head -5)
-    if [[ -z "$ifaces" ]]; then
-        log_debug "No network interfaces found!"
-        show_error "No network interfaces found!"
-        exit 1
-    fi
-    log_debug "Available interfaces: $ifaces"
-
-    # For early setup, try DHCP on all available interfaces
-    log_debug "Attempting DHCP on available interfaces..."
-    show_progress "Attempting DHCP on available interfaces..."
-    for iface in $ifaces; do
-        log_debug "Trying DHCP on $iface..."
-        show_progress "Trying DHCP on $iface..."
-        log_debug "Executing: ip link set $iface up"
-        ip link set "$iface" up &>> "$LOG_FILE"
-        log_debug "Executing: dhclient -1 -v $iface"
-        if dhclient -1 -v "$iface" &>> "$LOG_FILE"; then # Capture dhclient output
-            log_debug "dhclient for $iface succeeded. Checking connectivity..."
-            if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-                log_debug "Network configured successfully on $iface via DHCP."
-                show_success "Network configured successfully on $iface"
-                return 0
-            else
-                log_debug "DHCP on $iface seemed to work, but ping failed."
-            fi
-        else
-            log_debug "dhclient for $iface failed."
-        fi
-    done
-
-    # If DHCP failed, manual configuration
-    log_debug "DHCP failed on all interfaces. Manual configuration required."
-    show_warning "DHCP failed. Manual network configuration required."
-
-    # Manual network setup using dialog
-    log_debug "Preparing for manual network setup dialog with improved interface detection."
-
-    local all_potential_ifaces=()
-    if [[ -d "/sys/class/net" ]]; then
-        for iface_path in /sys/class/net/*; do
-            local iface_name
-            iface_name=$(basename "$iface_path")
-            # Apply filtering
-            if [[ "$iface_name" == "lo" || \
-                  "$iface_name" == veth* || \
-                  "$iface_name" == virbr* || \
-                  "$iface_name" == docker* || \
-                  "$iface_name" == tun* || \
-                  "$iface_name" == tap* ]]; then
-                log_debug "Excluding interface from manual selection list: $iface_name"
-                continue
-            fi
-            all_potential_ifaces+=("$iface_name")
-        done
-    fi
-    log_debug "Filtered potential interfaces for manual selection: ${all_potential_ifaces[*]}"
-
-    local iface_options=()
-    if [[ ${#all_potential_ifaces[@]} -gt 0 ]]; then
-        for iface_item in "${all_potential_ifaces[@]}"; do
-            # Fetch status and IP for dialog
-            local status; status=$(ip link show "$iface_item" 2>/dev/null | grep -q "state UP" && echo "UP" || echo "DOWN")
-            local current_ip; current_ip=$(ip addr show "$iface_item" 2>/dev/null | grep "inet " | awk '{print $2}' | head -1)
-            local info_str="$status" # Renamed to avoid conflict with info command
-            [[ -n "$current_ip" ]] && info_str+=" ($current_ip)"
-            iface_options+=("$iface_item" "$iface_item $info_str" "off") # Added "off" for radiolist default
-        done
-    fi
-    log_debug "Interface options for dialog: ${iface_options[*]}"
-
-    local selected_iface
-    if [[ $((${#iface_options[@]}/3)) -eq 0 ]]; then # Each option has 3 parts (tag, item, status)
-        log_debug "No suitable interfaces found after filtering for manual selection dialog."
-        dialog --title "Network Setup" --infobox "No suitable network interfaces were automatically detected for selection." 5 70
-        sleep 2
-
-        selected_iface=$(dialog --title "Manual Network Interface" \
-            --inputbox "Please enter the network interface name you wish to configure manually (e.g., enp3s0):" 10 60 \
-            3>&1 1>&2 2>&3) || {
-                log_error "Manual interface input cancelled by user.";
-                show_error "Network configuration cancelled by user."
-                exit 1;
-            }
-        if [[ -z "$selected_iface" ]]; then
-            log_error "No interface name entered by user during manual input."
-            show_error "No network interface name provided. Cannot proceed."
-            exit 1
-        fi
-        log_debug "User manually entered interface: $selected_iface"
-    else
-        selected_iface=$(dialog --title "Network Interface" \
-            --radiolist "Select network interface to configure:" 15 70 $((${#iface_options[@]}/3)) \
-            "${iface_options[@]}" 3>&1 1>&2 2>&3) || {
-                log_debug "Manual interface selection (radiolist) cancelled.";
-                show_error "Network configuration cancelled by user."
-                exit 1;
-            }
-    fi
-    log_debug "User selected interface for manual configuration: $selected_iface"
-
-    local ip_addr
-    ip_addr=$(dialog --title "IP Address" \
-        --inputbox "Enter IP address with CIDR (e.g., 192.168.1.100/24):" 10 60 \
-        "192.168.1.100/24" 3>&1 1>&2 2>&3) || { log_debug "Manual IP address entry cancelled."; exit 1; }
-    log_debug "User entered IP address: $ip_addr"
-
-    local gateway
-    gateway=$(dialog --title "Gateway" \
-        --inputbox "Enter gateway IP:" 10 60 \
-        "192.168.1.1" 3>&1 1>&2 2>&3) || { log_debug "Manual gateway entry cancelled."; exit 1; }
-    log_debug "User entered gateway: $gateway"
-
-    # Configure interface
-    log_debug "Executing: ip link set $selected_iface up"
-    ip link set "$selected_iface" up &>> "$LOG_FILE"
-    log_debug "Executing: ip addr add $ip_addr dev $selected_iface"
-    ip addr add "$ip_addr" dev "$selected_iface" &>> "$LOG_FILE"
-    log_debug "Executing: ip route add default via $gateway"
-    ip route add default via "$gateway" &>> "$LOG_FILE"
-    log_debug "IP address and route configured."
-
-    # Configure DNS with Cloudflare and Google DNS
-    log_debug "Configuring DNS in /etc/resolv.conf with 1.1.1.1 and 8.8.8.8"
-    if [[ -L "/etc/resolv.conf" ]]; then
-        log_debug "/etc/resolv.conf is a symlink. Attempting to write."
-        show_warning "/etc/resolv.conf is a symlink. Attempting to write, but manual DNS configuration might be needed if changes don't persist."
-        if ! echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>> "$LOG_FILE"; then
-            log_debug "Failed to write 'nameserver 1.1.1.1' to /etc/resolv.conf (symlink target likely not writable)."
-            show_error "Failed to write to /etc/resolv.conf (symlink target likely not writable)."
-        else
-            log_debug "Wrote 'nameserver 1.1.1.1' to /etc/resolv.conf."
-            if ! echo "nameserver 8.8.8.8" >> /etc/resolv.conf 2>> "$LOG_FILE"; then
-                 log_debug "Failed to append 'nameserver 8.8.8.8' to /etc/resolv.conf."
-                 show_warning "Failed to append to /etc/resolv.conf (symlink target)."
-            else
-                 log_debug "Appended 'nameserver 8.8.8.8' to /etc/resolv.conf."
-            fi
-        fi
-    elif [[ ! -w "/etc/resolv.conf" ]]; then
-        log_debug "/etc/resolv.conf is not writable."
-        show_error "/etc/resolv.conf is not writable. Cannot configure DNS automatically."
-    else
-        log_debug "Writing DNS servers 1.1.1.1 and 8.8.8.8 to /etc/resolv.conf."
-        echo "nameserver 1.1.1.1" > /etc/resolv.conf
-        echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-        log_debug "DNS configured in /etc/resolv.conf."
-        show_success "DNS configured in /etc/resolv.conf"
-    fi
-
-    # Test connectivity
-    log_debug "Testing final network connectivity..."
-    if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-        log_debug "Network configured successfully (manual setup)."
-        show_success "Network configured successfully"
-    else
-        log_debug "Manual network configuration failed (ping test failed)."
-        show_error "Network configuration failed. Please check your settings."
-        exit 1
-    fi
-    log_debug "Exiting function: ${FUNCNAME[0]}"
 }
