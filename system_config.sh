@@ -138,9 +138,12 @@ EOF
         echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > \
             /etc/apt/sources.list.d/pve-no-subscription.list
 
-        apt-get update
+        log_debug "=== PACKAGE INSTALLATION DEBUG: Running apt-get update ==="
+        apt-get update -y &>> "$LOG_FILE"
+        log_debug "=== PACKAGE INSTALLATION DEBUG: apt-get update completed with status $? ==="
 
         # Install core packages first
+        log_debug "=== PACKAGE INSTALLATION DEBUG: Installing essential packages ==="
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
             linux-image-amd64 linux-headers-amd64 \
             zfs-initramfs cryptsetup-initramfs \
@@ -155,10 +158,14 @@ EOF
 
         if [[ "${_GRUB_MODE}" == "UEFI" ]]; then
             echo "[PROXMOX_AIO_INSTALLER_CHROOT] Installing UEFI GRUB packages..." >> /dev/kmsg
-            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-efi-amd64 efibootmgr
+            log_debug "=== PACKAGE INSTALLATION DEBUG: Installing EFI bootloader packages ==="
+            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-efi-amd64 efibootmgr &>> "$LOG_FILE"
+            log_debug "=== PACKAGE INSTALLATION DEBUG: EFI bootloader packages installation completed with status $? ==="
         elif [[ "${_GRUB_MODE}" == "BIOS" ]]; then
             echo "[PROXMOX_AIO_INSTALLER_CHROOT] Installing BIOS GRUB packages..." >> /dev/kmsg
-            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-pc
+            log_debug "=== PACKAGE INSTALLATION DEBUG: Installing BIOS bootloader packages ==="
+            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-pc &>> "$LOG_FILE"
+            log_debug "=== PACKAGE INSTALLATION DEBUG: BIOS bootloader packages installation completed with status $? ==="
         else
             echo "[PROXMOX_AIO_INSTALLER_CHROOT] ERROR: Unknown BOOT_MODE: ${_GRUB_MODE}. Cannot install GRUB." >> /dev/kmsg
             exit 1 # Critical error
@@ -167,9 +174,40 @@ EOF
         echo "[PROXMOX_AIO_INSTALLER_CHROOT] Checking and installing YubiKey packages..." >> /dev/kmsg
         if [[ "${USE_YUBIKEY}" == "yes" ]]; then
             echo "[PROXMOX_AIO_INSTALLER_CHROOT] USE_YUBIKEY=yes. Installing yubikey-luks and dependencies." >> /dev/kmsg
-            if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends yubikey-luks yubikey-manager libpam-yubico ykcs11 libykpers-1-1 libyubikey0 pcscd; then
-                echo "[PROXMOX_AIO_INSTALLER_CHROOT] CRITICAL: Failed to install YubiKey packages. This is fatal for YubiKey setup." >> /dev/kmsg
-                exit 1 # Exit the chroot script
+            log_debug "=== PACKAGE INSTALLATION DEBUG: Installing Yubikey packages ==="
+            log_debug "Installing YubiKey packages with all required dependencies"
+            # First try installing just yubikey-luks which is the core requirement
+            log_debug "=== PACKAGE INSTALLATION DEBUG: Attempting to install core yubikey-luks package ==="
+            if ! DEBIAN_FRONTEND=noninteractive apt-get install -y yubikey-luks &>> "$LOG_FILE"; then
+                log_debug "=== PACKAGE INSTALLATION DEBUG: Core yubikey-luks installation failed, trying with locally downloaded packages ==="
+                # Try to find and install the downloaded package directly
+                if [ -f "/debs/yubikey-luks_*.deb" ]; then
+                    log_debug "=== PACKAGE INSTALLATION DEBUG: Installing yubikey-luks from local deb ==="
+                    dpkg -i /debs/yubikey-luks_*.deb &>> "$LOG_FILE" || log_debug "Local yubikey-luks deb installation failed"
+                fi
+            fi
+            
+            # Verify if yubikey-luks-enroll is available after core package installation
+            if ! command -v yubikey-luks-enroll &>/dev/null; then
+                log_debug "=== PACKAGE INSTALLATION DEBUG: yubikey-luks-enroll command not available after core package, trying to install all dependencies ==="
+                # Try installing all dependencies if core package didn't provide yubikey-luks-enroll
+                if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                    yubikey-luks cryptsetup-run \
+                    yubikey-manager python3-ykman python3-click python3-cryptography python3-fido2 \
+                    yubikey-personalization libyubikey-udev \
+                    libpam-yubico ykcs11 libykpers-1-1 libyubikey0 pcscd &>> "$LOG_FILE"; then
+                    log_debug "=== PACKAGE INSTALLATION DEBUG: Complete Yubikey packages installation FAILED with status $? ==="
+                    echo "[PROXMOX_AIO_INSTALLER_CHROOT] WARNING: Failed to install all YubiKey packages. YubiKey support may be limited." >> /dev/kmsg
+                    # We'll continue but warn the user later if yubikey-luks-enroll is still missing
+                fi
+            fi
+            
+            # Final verification of critical command
+            if ! command -v yubikey-luks-enroll &>/dev/null; then
+                log_debug "=== PACKAGE INSTALLATION DEBUG: yubikey-luks-enroll STILL not available after all attempts ==="
+                echo "[PROXMOX_AIO_INSTALLER_CHROOT] CRITICAL: yubikey-luks-enroll command not available. YubiKey setup will not work." >> /dev/kmsg
+                # Setting a flag to inform the user later, but not exiting as this is not fatal for the whole system
+                export YUBIKEY_SETUP_FAILED=true
             fi
             echo "[PROXMOX_AIO_INSTALLER_CHROOT] YubiKey packages installed successfully. Enabling pcscd service." >> /dev/kmsg
             if ! systemctl enable pcscd; then
@@ -290,13 +328,43 @@ EOF
 
         echo "root:${ROOT_PASSWORD}" | chpasswd
 
-        DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi
+        log_debug "=== PACKAGE INSTALLATION DEBUG: Installing Proxmox VE and related packages ==="
+        DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi &>> "$LOG_FILE"
+        log_debug "=== PACKAGE INSTALLATION DEBUG: Proxmox VE packages installation completed with status $? ==="
 
+        # Remove enterprise repository files
         rm -f /etc/apt/sources.list.d/pve-enterprise.list
+        
+        # Replace enterprise Ceph repo with non-enterprise one if it exists
+        if [[ -f /etc/apt/sources.list.d/ceph.list ]]; then
+            log_debug "Enterprise Ceph repository found, replacing with non-enterprise repo"
+            echo "deb http://download.proxmox.com/debian/ceph-quincy bookworm no-subscription" > /etc/apt/sources.list.d/ceph.list
+            log_debug "Ceph repository updated to use non-enterprise version"
+        fi
+        
+        # Also check for alternative ceph conf location
+        if [[ -f /etc/apt/sources.list.d/ceph.conf ]]; then
+            log_debug "Enterprise Ceph config found, replacing with non-enterprise repo"
+            echo "deb http://download.proxmox.com/debian/ceph-quincy bookworm no-subscription" > /etc/apt/sources.list.d/ceph.conf
+            log_debug "Ceph configuration updated to use non-enterprise version"
+        fi
+        
+        # Skip explicit ZFS package installation as Proxmox already includes ZFS support
+        log_debug "=== PACKAGE INSTALLATION DEBUG: Skipping explicit ZFS package installation (using Proxmox native ZFS) ==="
+        # Verify ZFS is available
+        if command -v zpool &>/dev/null && command -v zfs &>/dev/null; then
+            log_debug "=== PACKAGE INSTALLATION DEBUG: ZFS commands (zpool/zfs) are already available ==="
+        else
+            log_debug "=== PACKAGE INSTALLATION WARNING: ZFS commands not found, attempting minimal installation ==="
+            # Only install the basic zfsutils if really needed - should be rare with Proxmox
+            DEBIAN_FRONTEND=noninteractive apt-get install -y zfsutils-linux &>> "$LOG_FILE"
+        fi
 
         systemctl enable ssh
 
-        apt-get clean
+        log_debug "=== PACKAGE INSTALLATION DEBUG: Running apt-get clean ==="
+        apt-get clean &>> "$LOG_FILE"
+        log_debug "=== PACKAGE INSTALLATION DEBUG: apt-get clean completed with status $? ==="
 
 CHROOT_SCRIPT
 
@@ -372,12 +440,58 @@ CHROOT_SCRIPT
         log_debug "Local .deb packages found in $debs_source_dir. Installing them in chroot."
         show_progress "Installing local .deb packages..."
         cp -r "$debs_source_dir" /mnt/tmp/ &>> "$LOG_FILE"
-        log_debug "Executing in chroot: dpkg -i /tmp/debs/*.deb || apt-get -f install -y"
+        log_debug "=== PACKAGE INSTALLATION DEBUG: Installing local .deb packages ==="
+        show_progress "Installing local packages with timeout protection..."
+        
+        # Create a wrapper script with timeout protection
+        cat > /mnt/tmp/install_packages.sh << 'EOL'
+#!/bin/bash
+set -x
+
+# Set environment variables
+export DEBIAN_FRONTEND=noninteractive
+export DEBIAN_PRIORITY=critical
+
+# Try to install packages with timeout
+timeout 300 bash -c 'dpkg -i /tmp/debs/*.deb || apt-get -f install -y'
+DPKG_STATUS=$?
+
+if [ $DPKG_STATUS -eq 124 ] || [ $DPKG_STATUS -eq 143 ]; then
+  echo "WARNING: Package installation timed out after 5 minutes. Attempting to recover..."
+  # Force recovery with dpkg and apt
+  dpkg --configure -a
+  apt-get -f install -y
+  apt-get update -y
+  apt-get -f install -y
+  exit 1
+fi
+
+exit $DPKG_STATUS
+EOL
+
+        # Make the script executable
+        chmod +x /mnt/tmp/install_packages.sh
+        
+        log_debug "Executing install_packages.sh in chroot with timeout protection"
         echo "--- Chroot dpkg/apt-get Output Start ---" >> "$LOG_FILE"
-        chroot /mnt bash -c "dpkg -i /tmp/debs/*.deb || apt-get -f install -y" >> "$LOG_FILE" 2>&1
+        chroot /mnt /tmp/install_packages.sh >> "$LOG_FILE" 2>&1
         local dpkg_status=$?
         echo "--- Chroot dpkg/apt-get Output End ---" >> "$LOG_FILE"
-        log_debug "Chroot dpkg/apt-get finished with status: $dpkg_status"
+        
+        # Clean up the script
+        rm -f /mnt/tmp/install_packages.sh
+        
+        if [ $dpkg_status -ne 0 ]; then
+            log_debug "=== PACKAGE INSTALLATION DEBUG: Local package installation had issues. Status: $dpkg_status ==="
+            show_warning "Package installation had issues. Attempting to continue..."
+            
+            # Try to repair package system
+            log_debug "Attempting to repair package system in chroot"
+            chroot /mnt bash -c "dpkg --configure -a; apt-get -f install -y" >> "$LOG_FILE" 2>&1
+        else
+            log_debug "=== PACKAGE INSTALLATION DEBUG: Local package installation completed with status: $dpkg_status ==="
+            show_success "Package installation completed successfully"
+        fi
         rm -rf /mnt/tmp/debs
         log_debug "Removed /mnt/tmp/debs."
     else

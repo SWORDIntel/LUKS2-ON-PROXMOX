@@ -261,10 +261,9 @@ gather_user_options() {
             dialog --title "No Suitable Drives" --msgbox "No suitable separate drives were found to be used for detached LUKS headers. You can either attach a new drive and restart the installer, or choose to use standard on-disk encryption." 10 70
             CONFIG_VARS[USE_DETACHED_HEADERS]="no" # Revert choice
             show_encryption_menu=true # Go back to the main encryption menu
-            # This continue will skip the rest of the detached header logic in the current
-            # iteration and go to the next iteration of the while loop,
-            # which will re-display the encryption menu because show_encryption_menu is true.
-            continue
+            # Return from function, the caller will re-display the encryption menu
+            # because show_encryption_menu is true
+            return
         fi
 
         local header_disk
@@ -273,7 +272,7 @@ gather_user_options() {
             # If user cancels header disk selection, also go back to encryption menu
             CONFIG_VARS[USE_DETACHED_HEADERS]="no"; # Revert choice
             show_encryption_menu=true;
-            continue; # Go back to the main encryption menu
+            return; # Go back to the main encryption menu
         }
         CONFIG_VARS[HEADER_DISK]="$header_disk"
         log_debug "Selected header disk: ${CONFIG_VARS[HEADER_DISK]}"
@@ -291,7 +290,7 @@ gather_user_options() {
                 # If user cancels, go back to encryption menu
                 CONFIG_VARS[USE_DETACHED_HEADERS]="no"; # Revert choice
                 show_encryption_menu=true;
-                continue; # Go back to the main encryption menu
+                return; # Exit function and go back to the main encryption menu
             }
             if ! [[ "$header_part_device" =~ ^/dev/ ]]; then
                 log_error "Invalid header partition device entered: $header_part_device. Does not start with /dev/."
@@ -301,7 +300,7 @@ gather_user_options() {
                 dialog --title "Invalid Input" --msgbox "The partition device '$header_part_device' is not valid. It must start with /dev/. Please try again." 8 70
                 CONFIG_VARS[USE_DETACHED_HEADERS]="no"; # Revert
                 show_encryption_menu=true;
-                continue;
+                return;
             fi
             CONFIG_VARS[HEADER_PART_DEVICE]="$header_part_device"
             log_debug "User selected existing header partition: ${CONFIG_VARS[HEADER_PART_DEVICE]}"

@@ -65,8 +65,8 @@ fi
 log_info "Adding Proxmox VE repositories..."
 
 # Ensure prerequisites for adding repos
-apt update
-apt install --yes gpg curl apt-transport-https
+apt-get update
+apt-get install --yes gpg curl apt-transport-https
 
 # Add Proxmox VE GPG key
 if curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg; then
@@ -81,8 +81,8 @@ PVE_REPO_FILE="/etc/apt/sources.list.d/pve-install-repo.list"
 echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > "${PVE_REPO_FILE}"
 
 log_info "Proxmox VE repository configuration added."
-log_info "Running apt update to fetch package lists from new repos..."
-apt update
+log_info "Running apt-get update to fetch package lists from new repos..."
+apt-get update
 
 # --- 2. Install Proxmox VE Kernel and Tools ---
 log_info "Installing Proxmox VE kernel and tools..."
@@ -91,7 +91,7 @@ log_warn "This may install a new kernel and related packages."
 PACKAGES_PVE="proxmox-kernel-6.5 pve-headers-6.5 qemu-server proxmox-backup-client"
 
 if ask_yes_no "Install Proxmox VE kernel (6.5) and common tools?"; then
-    if apt install --yes "${PACKAGES_PVE}"; then
+    if apt-get install --yes "${PACKAGES_PVE}"; then
         log_info "Proxmox VE packages installed."
     else
         log_error "Failed to install Proxmox VE packages. Please check errors."
@@ -107,11 +107,11 @@ PACKAGES_COCKPIT="cockpit cockpit-storaged cockpit-networkmanager cockpit-packag
 PACKAGES_COCKPIT_ZFS="cockpit-zfs-manager"
 
 if ask_yes_no "Install Cockpit and common modules?"; then
-    if apt install --yes "${PACKAGES_COCKPIT}"; then
+    if apt-get install --yes "${PACKAGES_COCKPIT}"; then
         log_info "Cockpit and common modules installed."
 
         if ask_yes_no "Attempt to install 'cockpit-zfs-manager'? (May not be available)"; then
-            if apt install --yes "${PACKAGES_COCKPIT_ZFS}"; then
+            if apt-get install --yes "${PACKAGES_COCKPIT_ZFS}"; then
                 log_info "'cockpit-zfs-manager' installed."
             else
                 log_warn "'cockpit-zfs-manager' failed to install. It might not be available in your configured repositories."
@@ -138,7 +138,7 @@ if ask_yes_no "Install KDE Plasma Desktop Environment? (This will install a full
     # task-kde-desktop is the recommended meta-package for a full KDE experience
     PACKAGES_KDE="task-kde-desktop"
 
-    if apt install --yes "${PACKAGES_KDE}"; then
+    if apt-get install --yes "${PACKAGES_KDE}"; then
         log_info "KDE Plasma Desktop installed successfully."
         # The task-kde-desktop should configure the display manager, but we can ensure it's enabled.
         # SDDM is the default display manager for KDE.
@@ -157,7 +157,7 @@ fi
 
 # --- 5. Final Steps ---
 log_info "Running final package updates and GRUB update..."
-apt update
+apt-get update
 
 if command -v update-grub &> /dev/null; then
     log_info "Updating GRUB configuration to detect new kernels..."

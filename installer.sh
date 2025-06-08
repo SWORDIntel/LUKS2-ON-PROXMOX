@@ -78,7 +78,9 @@ declare -A CONFIG_VARS # Associative array to hold all config
 
 # --- Additional safety globals ---
 # shellcheck disable=SC2034 # Used in sourced core_logic.sh (partition_and_format_disks)
-INSTALLER_DEVICE=$(df / | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//'); readonly INSTALLER_DEVICE
+INSTALLER_DEVICE=$(df / | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//')
+export INSTALLER_DEVICE
+readonly INSTALLER_DEVICE
 # shellcheck disable=SC2034 # Used in sourced preflight_checks.sh
 readonly MIN_RAM_MB=4096
 # shellcheck disable=SC2034 # Used in sourced preflight_checks.sh
@@ -87,9 +89,12 @@ readonly MIN_DISK_GB=32
 # --- Source external function libraries ---
 source ./ui_functions.sh
 source ./preflight_checks.sh
+source ./install_dependencies.sh
 source ./network_config.sh
 source ./core_logic.sh
 source ./ramdisk_setup.sh
+source ./validation_module.sh
+source ./health_checks.sh
 
 run_installation_logic() {
     if [[ "${CONFIG_FILE_PATH:-}" ]]; then
@@ -100,9 +105,17 @@ run_installation_logic() {
     fi
     
     partition_and_format_disks
+    health_check "disks" true
+    
     setup_luks_encryption
+    health_check "luks" true
+    
     setup_zfs_pool
+    health_check "zfs" true
+    
     install_base_system
+    health_check "system" true
+    
     configure_new_system
     
     if [[ "${CONFIG_VARS[USE_CLOVER]:-}" == "yes" ]]; then
@@ -111,12 +124,19 @@ run_installation_logic() {
     
     backup_luks_header
     finalize
+    
+    # Final comprehensive health check
+    health_check "all" false
 }
 
 main() {
-    # Parse arguments
-    local run_from_ram=false
+    # Default settings - will be overridden by CLI flags or config file
+    local validate_only=false
     local config_file=""
+    local run_from_ram=false
+    local no_ram_boot=false
+
+    # Parse command line arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
             --run-from-ram)
@@ -129,10 +149,22 @@ main() {
                 log_debug "Argument: --config detected with value: $config_file"
                 shift 2
                 ;;
+            --validate)
+                validate_only=true
+                log_debug "Argument: --validate detected"
+                shift
+                ;;
+            --no-ram-boot)
+                no_ram_boot=true
+                log_debug "Argument: --no-ram-boot detected"
+                shift
+                ;;
             --help)
                 log_debug "Argument: --help detected"
                 echo "Usage: $0 [--config <config_file>]"
                 echo "       $0 --run-from-ram [--config <config_file>]"
+                echo "       $0 --validate [--config <config_file>]"
+                echo "       $0 --no-ram-boot [--config <config_file>]"
                 exit 0
                 ;;
             *)
@@ -151,114 +183,73 @@ main() {
     log_debug "Calling init_environment..."
     init_environment
     log_debug "init_environment finished."
+    
+    # Install dependencies from /debs first before any other operations
+    log_debug "Installing local dependencies from /debs directory..."
+    install_local_dependencies
+    log_debug "Local dependencies installation finished."
 
-    # --- Beginning of new section for .deb download ---
-    # Check if we are NOT already running from RAM disk
-    log_debug "Run from RAM mode: $run_from_ram"
-    if [[ "$run_from_ram" == false ]]; then
-        log_debug "Not running from RAM, checking for internet and .deb packages download."
-        # Check for internet connectivity
-        if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-            log_debug "Internet connection detected."
-            show_progress "Internet connection detected."
-            # Check if debs directory is empty or not present
-            # SCRIPT_DIR is globally defined at the top of this script.
-            debs_dir="$SCRIPT_DIR/debs"
-            log_debug "Debs directory path: $debs_dir"
-
-            # Ensure download_debs.sh exists and is executable
-            download_script_path="$SCRIPT_DIR/download_debs.sh"
-            log_debug "Download script path: $download_script_path"
-            if [ ! -f "$download_script_path" ]; then
-                log_debug "download_debs.sh script not found."
-                show_warning "Warning: download_debs.sh script not found. Cannot download .deb packages."
-            elif [ ! -x "$download_script_path" ]; then
-                log_debug "download_debs.sh not executable."
-                show_warning "Warning: download_debs.sh is not executable. Please run: chmod +x $download_script_path"
-            else
-                log_debug "download_debs.sh found and is executable."
-                # Check if debs dir is empty.
-                proceed_with_download_prompt=false
-                if [ ! -d "$debs_dir" ] || [ -z "$(ls -A "$debs_dir" 2>/dev/null)" ]; then
-                    log_debug "'debs' directory is missing or empty. Prompting for download."
-                    proceed_with_download_prompt=true
-                else
-                    log_debug "'debs' directory already contains files."
-                fi
-
-                if [[ "$proceed_with_download_prompt" == true ]]; then
-                    if (dialog --title "Download .deb Packages" --yesno "The local 'debs' directory is empty. This installer can download required .deb packages for offline installation on an air-gapped machine. Would you like to download them now?" 12 78); then
-                        log_debug "User chose to download .deb packages."
-                        show_progress "Attempting to download .deb packages..."
-                        if "$download_script_path"; then # Runs download_debs.sh
-                            log_debug "download_debs.sh script executed."
-                            show_success ".deb package download process finished."
-                            if [ -z "$(ls -A "$debs_dir" 2>/dev/null)" ]; then
-                                log_debug "'debs' directory still empty after download attempt."
-                                show_warning "The 'debs' directory is still empty after download attempt. Check package_urls.txt and internet connection."
-                            else
-                                log_debug "'debs' directory populated."
-                                show_success "Local 'debs' directory has been populated."
-                            fi
-                        else
-                            log_debug "download_debs.sh script encountered an error. Exit status: $?"
-                            show_error "download_debs.sh script encountered an error."
-                        fi
-                    else
-                        log_debug "User skipped .deb package download."
-                        show_warning "Skipping .deb package download. If this is for an air-gapped machine, ensure 'debs' directory is populated manually."
-                    fi
-                else
-                    show_progress "Local 'debs' directory already contains files. Skipping download prompt."
-                fi
-            fi
-            # Reminder to copy files to USB
-            log_debug "Displaying 'Prepare USB Stick' dialog."
-            dialog --title "Prepare USB Stick" --msgbox "If you intend to run this installer on an air-gapped machine, please ensure you copy the ENTIRE installer directory (including the 'debs' folder, 'download_debs.sh', and 'package_urls.txt') to your USB stick after this process completes or after downloads." 12 78
-        else
-            log_debug "No internet connection detected. Skipping .deb package download."
-            show_warning "No internet connection detected. Skipping .deb package download. Ensure 'debs' directory is populated for air-gapped installation."
-        fi
+    # Check if we're in validation mode first, as this doesn't require RAM pivot
+    if [[ "$validate_only" == true ]]; then
+        log_debug "Validation mode detected, skipping RAM pivot and running validation"
+        show_header "VALIDATION MODE"
+        # Basic connectivity check for validation purposes only
+        check_basic_connectivity
+        validate_installation
+        log_debug "Validation completed, exiting..."
+        exit 0
     fi
-    # --- End of new section for .deb download ---
-
+    
+    # Run from RAM environment decision
     if [[ "$run_from_ram" == true ]]; then
-        log_debug "Running from RAM. Configuring network if needed, then running installation logic."
-        # If already in RAM disk, check if we need to configure network
-        # configure_network_early is defined in network_config.sh
-        if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-            log_debug "No internet in RAM mode, calling configure_network_early."
-            configure_network_early
-            log_debug "configure_network_early finished."
-        else
-            log_debug "Internet connection detected in RAM mode."
-        fi
-        log_debug "Calling run_installation_logic (from RAM)..."
+        log_debug "Already running from RAM environment. Proceeding with installation..."
+        
+        # Network configuration (now moved to happen AFTER RAM pivot)
+        configure_network_in_ram
+        
+        # Run the main installation logic now that we're in RAM
+        log_debug "Calling run_installation_logic from RAM environment..."
         run_installation_logic
-        log_debug "run_installation_logic (from RAM) finished."
+        log_debug "run_installation_logic finished."
     else
-        log_debug "Not running from RAM. Performing pre-flight checks, network config, then RAM disk setup."
-        # Run pre-flight checks first
-        # run_system_preflight_checks is defined in preflight_checks.sh
-        log_debug "Calling run_system_preflight_checks..."
-        run_system_preflight_checks
-        log_debug "run_system_preflight_checks finished."
-
-        # Configure network if needed before RAM disk setup
-        # configure_network_early is defined in network_config.sh
-        if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-            log_debug "No internet before RAM setup, calling configure_network_early."
-            configure_network_early
-            log_debug "configure_network_early finished."
+        # Not yet in RAM, need to pivot
+        if [[ "$no_ram_boot" == true ]]; then
+            log_debug "RAM boot disabled by user. Running installation directly (not recommended)"
+            show_warning "Running without RAM pivot. This is not recommended as it may cause issues when modifying boot media."
+            
+            # Minimal network configuration for package download only
+            configure_minimal_network
+            
+            # Download packages if needed for offline installation
+            download_offline_packages
+            
+            # Run installation directly
+            log_debug "Calling run_installation_logic without RAM pivot..."
+            run_installation_logic
+            log_debug "run_installation_logic finished."
         else
-            log_debug "Internet connection detected before RAM setup."
+            log_debug "Standard installation path: preparing RAM environment first"
+            
+            # Minimal network configuration for package download only
+            # This is a stripped-down version just to get packages before RAM pivot
+            configure_minimal_network
+            
+            # Download packages for offline installation if needed
+            download_offline_packages
+            
+            # Run pre-flight checks before RAM pivot
+            log_debug "Running pre-flight checks before RAM pivot..."
+            run_system_preflight_checks
+            
+            # Now pivot to RAM - all disk operations will happen after this
+            log_debug "Pivoting to RAM environment..."
+            prepare_ram_environment
+            log_debug "prepare_ram_environment called. Script should re-launch in RAM mode."
         fi
-
-        # prepare_ram_environment is defined in ramdisk_setup.sh
-        log_debug "Calling prepare_ram_environment..."
-        prepare_ram_environment
-        log_debug "prepare_ram_environment finished. Script should re-launch in RAM mode."
     fi
+    
+    # This block is now handled in the main flow restructuring above
+    log_debug "Execution flow handled by the main RAM-first logic structure"
 }
 
 # Start execution

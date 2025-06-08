@@ -84,27 +84,41 @@ setup_luks_encryption() {
         # YubiKey Enrollment if selected
         if [[ "${CONFIG_VARS[USE_YUBIKEY]:-no}" == "yes" ]]; then
             log_debug "Attempting YubiKey enrollment for LUKS partition: $part"
-            dialog --title "YubiKey Enrollment" --infobox "Preparing to enroll YubiKey for $part.\n\nPlease follow the upcoming prompts from 'yubikey-luks-enroll'.\n\nYou will likely need to enter your main LUKS passphrase again and touch your YubiKey when it flashes." 10 70
-            sleep 4 # Give user time to read
-
-            show_progress "Please follow the prompts from yubikey-luks-enroll for $part."
-            # yubikey-luks-enroll output will go to TTY, not easily captured with command substitution if it uses /dev/tty
-            # We rely on its exit code and user observation.
-            if yubikey-luks-enroll -d "$part" -s 7; then
-                log_debug "YubiKey successfully enrolled for $part."
-                show_success "YubiKey enrolled for $part."
-            else
-                local enroll_status=$?
-                log_debug "YubiKey enrollment failed for $part (exit code: $enroll_status). Offering to continue without YubiKey for this disk."
-                show_error "YubiKey enrollment failed for $part."
-                if dialog --title "YubiKey Enrollment Failed" --yesno "YubiKey enrollment for $part failed. \nDo you want to continue setting up this disk with passphrase-only encryption, or cancel the entire installation?" 12 70; then
-                    log_debug "User chose to continue without YubiKey for $part after failed enrollment."
-                    show_warning "Continuing with passphrase-only encryption for $part."
+            
+            # First check if yubikey-luks-enroll is available (catches missing packages)
+            if ! command -v yubikey-luks-enroll &>/dev/null; then
+                log_debug "ERROR: yubikey-luks-enroll command not found - YubiKey enrollment cannot proceed"
+                show_error "YubiKey enrollment not possible - yubikey-luks-enroll command is missing."
+                if dialog --title "YubiKey Support Missing" --yesno "The required YubiKey enrollment tool is not available on this system.\n\nDo you want to continue with passphrase-only encryption for $part?" 10 70; then
+                    log_debug "User chose to continue without YubiKey for $part due to missing tool."
+                    show_warning "Continuing without YubiKey support."
                 else
-                    log_debug "User chose to cancel installation due to YubiKey enrollment failure."
-                    show_error "Installation cancelled by user due to YubiKey enrollment failure."
-                    # Consider calling cleanup or a more graceful exit if needed
+                    log_debug "User chose to cancel the installation due to missing YubiKey support."
+                    show_error "Installation cancelled due to missing YubiKey support."
                     exit 1
+                fi
+            else
+                dialog --title "YubiKey Enrollment" --infobox "Preparing to enroll YubiKey for $part.\n\nPlease follow the upcoming prompts from 'yubikey-luks-enroll'.\n\nYou will likely need to enter your main LUKS passphrase again and touch your YubiKey when it flashes." 10 70
+                sleep 4 # Give user time to read
+
+                show_progress "Please follow the prompts from yubikey-luks-enroll for $part."
+                # yubikey-luks-enroll output will go to TTY, not easily captured with command substitution if it uses /dev/tty
+                # We rely on its exit code and user observation.
+                if yubikey-luks-enroll -d "$part" -s 7; then
+                    log_debug "YubiKey successfully enrolled for $part."
+                    show_success "YubiKey enrolled for $part."
+                else
+                    local enroll_status=$?
+                    log_debug "YubiKey enrollment failed for $part (exit code: $enroll_status). Offering to continue without YubiKey for this disk."
+                    show_error "YubiKey enrollment failed for $part."
+                    if dialog --title "YubiKey Enrollment Failed" --yesno "YubiKey enrollment for $part failed. \nDo you want to continue setting up this disk with passphrase-only encryption, or cancel the entire installation?" 12 70; then
+                        log_debug "User chose to continue without YubiKey for $part after failed enrollment."
+                        show_warning "Continuing with passphrase-only encryption for $part."
+                    else
+                        log_debug "User chose to cancel installation due to YubiKey enrollment failure."
+                        show_error "Installation cancelled due to YubiKey enrollment failure."
+                        exit 1
+                    fi
                 fi
             fi
             dialog --title "Enrollment Status" --msgbox "YubiKey enrollment process for $part finished. Press OK to continue to the next disk (if any) or step." 8 70
