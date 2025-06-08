@@ -34,6 +34,22 @@ prepare_ram_environment() {
         cp "$CONFIG_FILE_PATH" "$RAMDISK_MNT/root/installer/"
     fi
 
+    # Also copy the 'debs' directory if it exists in the script directory
+    if [ -d "$script_dir/debs" ]; then
+        show_progress "Copying 'debs' directory to RAM disk..."
+        mkdir -p "$RAMDISK_MNT/root/installer/debs"
+        cp -r "$script_dir/debs"/* "$RAMDISK_MNT/root/installer/debs/" || {
+            show_warning "Failed to copy 'debs' directory. Local package installation might fail."
+        }
+    else
+        show_progress "No 'debs' directory found at $script_dir/debs, skipping copy."
+    fi
+
+    # Ensure download_debs.sh is executable in RAM disk if it was copied
+    if [ -f "$RAMDISK_MNT/root/installer/download_debs.sh" ]; then
+        chmod +x "$RAMDISK_MNT/root/installer/download_debs.sh"
+    fi
+
     # Mount necessary filesystems
     if ! mount --rbind /dev "$RAMDISK_MNT/dev"; then
         show_error "Failed to mount /dev into RAM disk at $RAMDISK_MNT/dev"
