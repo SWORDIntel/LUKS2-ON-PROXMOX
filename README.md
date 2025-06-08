@@ -21,7 +21,7 @@ This script provides a comprehensive, TUI-driven utility for installing Proxmox 
     *   DHCP or Static IP configuration for the Proxmox VE host.
     *   Automatic creation of a Linux bridge (`vmbr0`) connected to the primary network interface.
 *   **Offline Installation:**
-    *   **Local .deb Package Cache:** If required Debian packages are not available in the installation environment (e.g., air-gapped setup), the script can download them if an internet connection is present initially. These are stored in a `debs` subdirectory.
+    *   **Local .deb Package Cache:** If required Debian packages are not available in the installation environment (e.g., air-gapped setup), the script can download them if an internet connection is present initially. These are stored in a `debs` subdirectory. This includes all necessary packages for features like ZFS, LUKS, and YubiKey support.
     *   The installer can then use these cached .deb packages to install Proxmox VE and its dependencies without internet access.
 *   **Configuration Management:**
     *   **Text-based User Interface (TUI):** Guided dialogs for all installation options.
