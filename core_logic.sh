@@ -213,24 +213,69 @@ gather_user_options() {
     fi
 
     # Network Configuration
+    # Attempt to clear screen before network config (moved here from the end of Clover/Detached Header logic)
+    # clear
+    # show_progress "Preparing for network configuration..."
+    # sleep 1
+    # Note: The clear/sleep was moved to just before this block in a previous step.
+    # If it's not there, this subtask should focus only on the interface parsing.
+    # The subtask that added clear/sleep should be checked to ensure it placed it correctly.
+    # For now, assume it is correctly placed right before "show_progress "Gathering network configuration..."
+
     show_progress "Gathering network configuration..."
 
-    # Get network interfaces
-    local ifaces; ifaces=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo | head -5)
-    local iface_array=("$ifaces")
-    local iface_options=()
+    local iface_list=()
+    # Read available physical-like interfaces into an array, excluding loopback, docker, virtual bridge members etc.
+    # Taking up to 5, similar to original logic.
+    mapfile -t iface_list < <(ip -o link show | awk -F': ' '{print $2}' | grep -v -E 'lo|docker|veth|vmbr|virbr|bond|dummy|ifb|gre|ipip|ip6tnl|sit|tun|tap' | head -5)
 
-    for iface in "${iface_array[@]}"; do
-        local status; status=$(ip link show "$iface" | grep -q "state UP" && echo "UP" || echo "DOWN")
-        local current_ip; current_ip=$(ip addr show "$iface" 2>/dev/null | grep "inet " | awk '{print $2}' | head -1)
-        local info="$status"
-        [[ -n "$current_ip" ]] && info="$status, $current_ip"
-        iface_options+=("$iface" "$iface ($info)")
-    done
+    if [[ ${#iface_list[@]} -eq 0 ]]; then
+        show_warning "No network interfaces automatically detected or suitable."
+        local manual_iface
+        manual_iface=$(dialog --title "Network Interface" --inputbox "Please enter the primary network interface name (e.g., eth0, enp3s0):" 10 60 "" 3>&1 1>&2 2>&3)
 
-    CONFIG_VARS[NET_IFACE]=$(dialog --title "Network Interface" \
-        --radiolist "Select primary network interface:" 15 70 ${#iface_options[@]} \
-        "${iface_options[@]}" 3>&1 1>&2 2>&3) || exit 1
+        if [[ -z "$manual_iface" ]]; then
+            show_error "No network interface provided. Cannot proceed."
+            exit 1
+        fi
+        # Basic validation for manually entered interface (check if it exists)
+        if ! ip link show "$manual_iface" &>/dev/null; then
+            show_error "Interface '$manual_iface' does not seem to exist. Please check."
+            exit 1
+        fi
+        CONFIG_VARS[NET_IFACE]="$manual_iface"
+        show_progress "Using manually specified interface: ${CONFIG_VARS[NET_IFACE]}"
+    else
+        local iface_options=()
+        local first_iface_selected="on" # Pre-select the first interface in the radio list
+
+        for iface in "${iface_list[@]}"; do
+            local status; status=$(ip link show "$iface" | grep -q "state UP" && echo "UP" || echo "DOWN")
+            local current_ip; current_ip=$(ip addr show "$iface" 2>/dev/null | grep "inet " | awk '{print $2}' | head -1)
+            local info="$status"
+            [[ -n "$current_ip" ]] && info="$status, $current_ip"
+            iface_options+=("$iface" "$iface ($info)" "$first_iface_selected")
+            first_iface_selected="off" # Only the first item should be 'on'
+        done
+
+        if [[ ${#iface_options[@]} -eq 0 ]]; then
+            # This case should ideally not be reached if iface_list had items.
+            show_error "Failed to create options for network interface selection."
+            exit 1
+        fi
+
+        CONFIG_VARS[NET_IFACE]=$(dialog --title "Network Interface" \
+            --radiolist "Select primary network interface:" 15 70 $((${#iface_options[@]} / 3)) \
+            "${iface_options[@]}" 3>&1 1>&2 2>&3) || {
+                show_error "Network interface selection cancelled or failed."
+                exit 1
+            }
+    fi
+    # Ensure NET_IFACE is set if dialog is cancelled (it should exit above)
+    if [[ -z "${CONFIG_VARS[NET_IFACE]}" ]]; then
+        show_error "Network interface not selected. Aborting."
+        exit 1
+    fi
 
     # DHCP or Static
     if dialog --title "Network Configuration" --yesno "Use DHCP for network configuration?" 8 60; then
@@ -963,7 +1008,7 @@ install_clover_bootloader() {
 
     # Extract and install
     show_progress "Installing Clover..."
-    cd "$TEMP_DIR"
+    cd "$TEMP_DIR" || exit 1
     7z x -y clover.zip > /dev/null
 
     # Copy Clover to EFI partition

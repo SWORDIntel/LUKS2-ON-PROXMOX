@@ -37,27 +37,63 @@ configure_network_early() {
     # If DHCP failed, manual configuration
     show_warning "DHCP failed. Manual network configuration required."
 
-    # Manual network setup using dialog
-    local iface_array=("$ifaces")
-    local iface_options=()
+    local iface_list_for_manual=()
+    # Re-fetching is cleaner to ensure fresh data and apply better filtering.
+    mapfile -t iface_list_for_manual < <(ip -o link show | awk -F': ' '{print $2}' | grep -v -E 'lo|docker|veth|vmbr|virbr|bond|dummy|ifb|gre|ipip|ip6tnl|sit|tun|tap' | head -5)
 
-    for iface in "${iface_array[@]}"; do
-        local status; status=$(ip link show "$iface" | grep -q "state UP" && echo "UP" || echo "DOWN")
-        iface_options+=("$iface" "$iface ($status)")
-    done
+    local selected_iface # Will hold the final interface to configure
 
-    local selected_iface
-    selected_iface=$(dialog --title "Network Interface" \
-        --radiolist "Select network interface to configure:" 15 60 ${#iface_options[@]} \
-        "${iface_options[@]}" 3>&1 1>&2 2>&3) || exit 1
+    if [[ ${#iface_list_for_manual[@]} -eq 0 ]]; then
+        show_warning "No network interfaces automatically detected for manual setup."
+        local manual_iface_entry
+        manual_iface_entry=$(dialog --title "Manual Network Interface" --inputbox "Please enter the network interface name to configure (e.g., eth0):" 10 60 "" 3>&1 1>&2 2>&3)
+
+        if [[ -z "$manual_iface_entry" ]]; then
+            show_error "No network interface provided for manual configuration. Cannot proceed."
+            exit 1
+        fi
+        if ! ip link show "$manual_iface_entry" &>/dev/null; then
+            show_error "Interface '$manual_iface_entry' does not seem to exist. Please check."
+            exit 1
+        fi
+        selected_iface="$manual_iface_entry"
+        show_progress "Using manually specified interface for setup: $selected_iface"
+    else
+        local man_iface_options=()
+        local first_man_iface_selected="on"
+
+        for iface_man in "${iface_list_for_manual[@]}"; do
+            local status_man; status_man=$(ip link show "$iface_man" | grep -q "state UP" && echo "UP" || echo "DOWN")
+            # No need for IP here as we are setting it up manually
+            man_iface_options+=("$iface_man" "$iface_man ($status_man)" "$first_man_iface_selected")
+            first_man_iface_selected="off"
+        done
+
+        if [[ ${#man_iface_options[@]} -eq 0 ]]; then
+            show_error "Failed to create options for manual network interface selection."
+            exit 1
+        fi
+
+        selected_iface=$(dialog --title "Network Interface (Manual Setup)" \
+            --radiolist "Select network interface to configure manually:" 15 70 $((${#man_iface_options[@]} / 3)) \
+            "${man_iface_options[@]}" 3>&1 1>&2 2>&3) || {
+                show_error "Manual network interface selection cancelled or failed."
+                exit 1
+            }
+    fi
+
+    if [[ -z "$selected_iface" ]]; then
+        show_error "No interface selected for manual configuration. Aborting."
+        exit 1
+    fi
 
     local ip_addr
-    ip_addr=$(dialog --title "IP Address" \
+    ip_addr=$(dialog --title "IP Address for $selected_iface" \
         --inputbox "Enter IP address with CIDR (e.g., 192.168.1.100/24):" 10 60 \
         "192.168.1.100/24" 3>&1 1>&2 2>&3) || exit 1
 
     local gateway
-    gateway=$(dialog --title "Gateway" \
+    gateway=$(dialog --title "Gateway for $selected_iface" \
         --inputbox "Enter gateway IP:" 10 60 \
         "192.168.1.1" 3>&1 1>&2 2>&3) || exit 1
 
