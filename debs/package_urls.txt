@@ -1,3 +1,17 @@
 http://ftp.debian.org/debian/pool/main/c/curl/curl_7.88.1-10+deb12u5_amd64.deb
 http://ftp.debian.org/debian/pool/main/w/wget/wget_1.21.3-1+b1_amd64.deb
 http://ftp.debian.org/debian/pool/main/z/zstd/zstd_1.5.4+dfsg-2_amd64.deb
+
+# YubiKey support
+http://ftp.debian.org/debian/pool/main/y/yubikey-luks/yubikey-luks_0.5.1+29.g5df2b95-6.1_all.deb
+http://ftp.debian.org/debian/pool/main/y/yubikey-manager/yubikey-manager_4.0.9-1_all.deb
+http://ftp.debian.org/debian/pool/main/y/yubikey-personalization/yubikey-personalization_1.20.0-3_amd64.deb
+http://ftp.debian.org/debian/pool/main/y/yubikey-personalization/libykpers-1-1_1.20.0-3_amd64.deb
+http://ftp.debian.org/debian/pool/main/liby/libyubikey/libyubikey0_1.13-6_amd64.deb
+# Additional dependencies for yubikey-manager might be needed, e.g. python3-yubikey-manager.
+# For now, focusing on yubikey-luks and its direct dependencies.
+# ykman (command from yubikey-manager) also often uses pcscd and libpcsclite1
+http://ftp.debian.org/debian/pool/main/p/pcsc-lite/libpcsclite1_1.9.9-1_amd64.deb
+http://ftp.debian.org/debian/pool/main/p/pcsc-lite/pcscd_1.9.9-1_amd64.deb
+# libpam-yubico (for PAM module integration, might be useful later)
+http://ftp.debian.org/debian/pool/main/libp/libpam-yubico/libpam-yubico_2.26-1_amd64.deb
