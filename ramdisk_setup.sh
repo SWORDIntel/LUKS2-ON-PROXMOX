@@ -2,10 +2,13 @@
 
 prepare_ram_environment() {
     show_header "RAM DISK PREPARATION"
-    show_progress "Creating a 2.5GB filesystem in RAM..."
+    
+    # MODIFIED: Changed size from 6000M to 5G as per user request.
+    # This allocates a 5 Gigabyte temporary filesystem in RAM.
+    show_progress "Creating a 5GB filesystem in RAM..."
 
     mkdir -p "$RAMDISK_MNT"
-    if ! mount -t tmpfs -o size=6000M,rw tmpfs "$RAMDISK_MNT"; then
+    if ! mount -t tmpfs -o size=5G,rw tmpfs "$RAMDISK_MNT"; then
         show_error "Failed to mount RAM disk at $RAMDISK_MNT. Check available memory and permissions."
         exit 1
     fi
@@ -17,19 +20,23 @@ prepare_ram_environment() {
     # Use rsync for more reliable copying with progress
     rsync -ax --info=progress2 / "$RAMDISK_MNT/" --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/run --exclude=/mnt --exclude=/media --exclude="$RAMDISK_MNT"
 
-    # Copy the installer script
-    cp "$0" "$RAMDISK_MNT/root/installer.sh"
-    chmod +x "$RAMDISK_MNT/root/installer.sh"
+    # AUDIT-FIX: Copy the entire script directory to maintain context for sourced files.
+    local script_dir; script_dir=$(dirname "$(readlink -f "$0")")
+    mkdir -p "$RAMDISK_MNT/root/installer"
+    cp -r "$script_dir"/* "$RAMDISK_MNT/root/installer/"
+    
+    # Ensure the main script is executable in its new location
+    local main_script_in_ram="$RAMDISK_MNT/root/installer/installer.sh"
+    chmod +x "$main_script_in_ram"
 
-    # Copy configuration if specified
-    if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then
-        cp "$CONFIG_FILE_PATH" "$RAMDISK_MNT/root/"
+    # Copy configuration if specified, placing it inside the new installer directory
+    if [[ -n "${CONFIG_FILE_PATH:-}" && -f "${CONFIG_FILE_PATH}" ]]; then
+        cp "$CONFIG_FILE_PATH" "$RAMDISK_MNT/root/installer/"
     fi
 
     # Mount necessary filesystems
     if ! mount --rbind /dev "$RAMDISK_MNT/dev"; then
         show_error "Failed to mount /dev into RAM disk at $RAMDISK_MNT/dev"
-        # Attempt to unmount ramdisk before exiting
         umount -lf "$RAMDISK_MNT" &>/dev/null
         exit 1
     fi
@@ -48,15 +55,16 @@ prepare_ram_environment() {
     fi
 
     show_header "PIVOTING TO RAM DISK"
-    show_warning "The system is now running from RAM. The original boot media can be safely removed."
+    show_warning "The system is now running from RAM. The original boot media can be safely removed if it is also the target."
 
-    # Execute in chroot with proper argument passing
-    local chroot_args="/bin/bash /root/installer.sh --run-from-ram"
-    if [[ -n "${CONFIG_FILE_PATH:-}" ]]; then
-        chroot_args+=" --config /root/$(basename "$CONFIG_FILE_PATH")"
+    # AUDIT-FIX (SC2086): Use 'bash -c' to safely execute the command string inside the chroot.
+    # This prevents word-splitting issues with arguments. We also change directory first.
+    local chroot_cmd="cd /root/installer && ./installer.sh --run-from-ram"
+    if [[ -n "${CONFIG_FILE_PATH:-}" && -f "${CONFIG_FILE_PATH}" ]]; then
+        chroot_cmd+=" --config $(basename "$CONFIG_FILE_PATH")"
     fi
 
-    chroot "$RAMDISK_MNT" "$chroot_args"
+    chroot "$RAMDISK_MNT" /bin/bash -c "$chroot_cmd"
     local exit_status=$?
 
     cleanup
