@@ -189,7 +189,7 @@ main() {
                 echo "  --help, -h        : Show this help message"
                 exit 0
                 ;;
-            *) show_error "Unknown option: '$1'" && exit 1 ;;
+            *) show_error "Unknown option: '$1'" "$(basename "$0")" "$LINENO" && exit 1 ;;
         esac
     done
     export CONFIG_FILE_PATH="$config_file"

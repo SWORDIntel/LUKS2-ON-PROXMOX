@@ -71,9 +71,16 @@ show_success() {
     printf "  %s %s\n" "${CHECK}" "$1"
 }
 
-# Displays an error message to standard error.
+# Displays an error message to standard error, including script name and line number.
 show_error() {
-    printf "  %s %s%s%s\n" "${CROSS}" "${RED}" "$1" "${RESET}" >&2
+    # $1: error message
+    # $2: script name (optional)
+    # $3: line number (optional)
+    local message="$1"
+    local script_name="${2:-$(basename "${BASH_SOURCE[1]:-$0}")}" # Caller script or current
+    local line_info="${3:+"at line $3"}" # Add 'at line' only if $3 is provided
+
+    printf "  %s %sERROR in %s %s: %s%s\n" "${CROSS}" "${RED}" "$script_name" "$line_info" "$message" "${RESET}" >&2
 }
 
 # Displays a warning message.

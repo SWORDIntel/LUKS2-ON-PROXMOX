@@ -117,8 +117,15 @@ partition_and_format_disks() {
     log_debug "Wiping selected disks..."
     while IFS= read -r disk; do
         show_progress "Wiping disk: $disk..."
+        log_debug "Executing: wipefs -af \"$disk\""
         wipefs -af "$disk" &>> "$LOG_FILE"
+        local exit_code_wipefs=$?
+        log_debug "Exit code for wipefs on \"$disk\": $exit_code_wipefs"
+
+        log_debug "Executing: sgdisk --zap-all \"$disk\""
         sgdisk --zap-all "$disk" &>> "$LOG_FILE"
+        local exit_code_sgdisk_zap=$?
+        log_debug "Exit code for sgdisk --zap-all on \"$disk\": $exit_code_sgdisk_zap"
     done <<< "$unique_disks_to_check"
 
     # Wait for the kernel to recognize the wiped disks.
@@ -135,15 +142,29 @@ partition_and_format_disks() {
     # Primary disk partitioning (unchanged, it's good)
     local primary_target=${target_disks_arr[0]}
     show_progress "Partitioning primary target disk: $primary_target"
+    log_debug "Executing: sgdisk -n 1:1M:+512M -t 1:EF00 -c 1:EFI \"$primary_target\""
     sgdisk -n 1:1M:+512M -t 1:EF00 -c 1:EFI "$primary_target" &>> "$LOG_FILE"
+    local exit_code_sgdisk_n1=$?
+    log_debug "Exit code for sgdisk EFI part on \"$primary_target\": $exit_code_sgdisk_n1"
+
+    log_debug "Executing: sgdisk -n 2:0:+1G -t 2:8300 -c 2:Boot \"$primary_target\""
     sgdisk -n 2:0:+1G  -t 2:8300 -c 2:Boot "$primary_target" &>> "$LOG_FILE"
+    local exit_code_sgdisk_n2=$?
+    log_debug "Exit code for sgdisk Boot part on \"$primary_target\": $exit_code_sgdisk_n2"
+
+    log_debug "Executing: sgdisk -n 3:0:0 -t 3:BF01 -c 3:LUKS-ZFS \"$primary_target\""
     sgdisk -n 3:0:0    -t 3:BF01 -c 3:LUKS-ZFS "$primary_target" &>> "$LOG_FILE"
+    local exit_code_sgdisk_n3=$?
+    log_debug "Exit code for sgdisk LUKS-ZFS part on \"$primary_target\": $exit_code_sgdisk_n3"
 
     # Additional disk partitioning (unchanged, it's good)
     for i in $(seq 1 $((${#target_disks_arr[@]}-1))); do
         local disk=${target_disks_arr[$i]}
         show_progress "Partitioning additional ZFS disk: $disk"
+        log_debug "Executing: sgdisk -n 1:0:0 -t 1:BF01 -c 1:LUKS-ZFS \"$disk\""
         sgdisk -n 1:0:0 -t 1:BF01 -c 1:LUKS-ZFS "$disk" &>> "$LOG_FILE"
+        local exit_code_sgdisk_n_add=$?
+        log_debug "Exit code for sgdisk LUKS-ZFS part on \"$disk\": $exit_code_sgdisk_n_add"
     done
 
     # Clover disk partitioning (unchanged, it's good)
@@ -156,7 +177,10 @@ partition_and_format_disks() {
     
     # Final udevadm settle and formatting (unchanged, it's excellent)
     log_debug "Waiting for all new partitions to become available..."
+    log_debug "Executing: partprobe"
     partprobe &>> "$LOG_FILE"
+    local exit_code_partprobe=$?
+    log_debug "Exit code for partprobe: $exit_code_partprobe"
     udevadm settle
 
     local p_prefix=""
@@ -164,8 +188,15 @@ partition_and_format_disks() {
     CONFIG_VARS[EFI_PART]="${primary_target}${p_prefix}1"
     CONFIG_VARS[BOOT_PART]="${primary_target}${p_prefix}2"
     
+    log_debug "Executing: mkfs.vfat -F32 \"${CONFIG_VARS[EFI_PART]}\""
     mkfs.vfat -F32 "${CONFIG_VARS[EFI_PART]}" &>> "$LOG_FILE"
+    local exit_code_mkfs_vfat=$?
+    log_debug "Exit code for mkfs.vfat on \"${CONFIG_VARS[EFI_PART]}\": $exit_code_mkfs_vfat"
+
+    log_debug "Executing: mkfs.ext4 -F \"${CONFIG_VARS[BOOT_PART]}\""
     mkfs.ext4 -F "${CONFIG_VARS[BOOT_PART]}" &>> "$LOG_FILE"
+    local exit_code_mkfs_ext4=$?
+    log_debug "Exit code for mkfs.ext4 on \"${CONFIG_VARS[BOOT_PART]}\": $exit_code_mkfs_ext4"
 
     # Identify LUKS partitions (unchanged, it's good)
     local luks_partitions=()
@@ -184,26 +215,33 @@ partition_and_format_disks() {
     
     # Post-partition verification
     show_progress "Verifying new partitions..."
-    
+    log_debug "Verifying EFI partition: ${CONFIG_VARS[EFI_PART]}"
+    log_debug "Verifying Boot partition: ${CONFIG_VARS[BOOT_PART]}"
+    log_debug "Verifying LUKS partitions: ${CONFIG_VARS[LUKS_PARTITIONS]}" # Log the whole list
+
     # Check that all expected partitions exist and are recognized by the system
     local missing_partitions=false
     
     # Check EFI partition
     if [[ ! -b "${CONFIG_VARS[EFI_PART]}" ]]; then
-        log_error "EFI partition ${CONFIG_VARS[EFI_PART]} not found or not a block device"
+        show_error "EFI partition ${CONFIG_VARS[EFI_PART]} not found or not a block device" "$(basename "$0")" "$LINENO"
         missing_partitions=true
     fi
     
     # Check boot partition
     if [[ ! -b "${CONFIG_VARS[BOOT_PART]}" ]]; then
-        log_error "Boot partition ${CONFIG_VARS[BOOT_PART]} not found or not a block device"
+        show_error "Boot partition ${CONFIG_VARS[BOOT_PART]} not found or not a block device" "$(basename "$0")" "$LINENO"
         missing_partitions=true
     fi
     
     # Check LUKS partitions
+    # No need to log each luks_part individually here if already logged above,
+    # but the loop itself is fine.
     for luks_part in ${CONFIG_VARS[LUKS_PARTITIONS]}; do
         if [[ ! -b "$luks_part" ]]; then
-            log_error "LUKS partition $luks_part not found or not a block device"
+            # It might be useful to log the specific failing part here if the list is long
+            log_debug "Specific LUKS partition check failed for: $luks_part"
+            show_error "LUKS partition $luks_part not found or not a block device" "$(basename "$0")" "$LINENO"
             missing_partitions=true
         fi
     done
