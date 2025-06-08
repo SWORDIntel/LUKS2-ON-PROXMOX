@@ -1,0 +1,3 @@
+http://ftp.debian.org/debian/pool/main/c/curl/curl_7.88.1-10+deb12u5_amd64.deb
+http://ftp.debian.org/debian/pool/main/w/wget/wget_1.21.3-1+b1_amd64.deb
+http://ftp.debian.org/debian/pool/main/z/zstd/zstd_1.5.4+dfsg-2_amd64.deb

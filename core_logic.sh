@@ -553,18 +553,25 @@ install_base_system() {
     local debian_release="bookworm"
     local debian_mirror="http://deb.debian.org/debian"
 
-    debootstrap --arch=amd64 --include=locales,vim,openssh-server,wget,curl \
-        "$debian_release" /mnt "$debian_mirror" |& \
-        while IFS= read -r line; do
-            if [[ "$line" =~ I:\ Retrieving|I:\ Validating|I:\ Extracting ]]; then
-                echo -ne "\r  ${BULLET} ${line:3:60}..." >&2
-            fi
-        done
-    echo
+    # Log debootstrap output for debugging
+    local debootstrap_log="$LOG_FILE.debootstrap"
+    echo "Debootstrap log:" > "$debootstrap_log"
 
-    show_success "Base system installed"
+    if ! debootstrap --arch=amd64 --include=locales,vim,openssh-server,wget,curl \
+        "$debian_release" /mnt "$debian_mirror" >> "$debootstrap_log" 2>&1; then
+        show_error "Debootstrap failed. Base system installation could not complete."
+        show_error "Check $debootstrap_log in the installation environment for details."
+        # LOG_FILE (and thus debootstrap_log) is in TEMP_DIR which should persist until cleanup
+        # or be accessible if script exits prematurely.
+        exit 1
+    fi
+    show_success "Base system installed (debootstrap successful)."
 
     cp "$LOG_FILE" /mnt/var/log/proxmox-install.log
+    # Also copy the debootstrap log if it was created
+    if [ -f "$debootstrap_log" ]; then
+        cp "$debootstrap_log" /mnt/var/log/
+    fi
 }
 
 configure_new_system() {
@@ -757,7 +764,12 @@ CHROOT_SCRIPT
     export ROOT_PASSWORD="$root_pass"
 
     show_progress "Configuring system in chroot (this will take several minutes)..."
-    chroot /mnt /tmp/configure.sh
+    if ! chroot /mnt /tmp/configure.sh; then
+        show_error "System configuration script (/tmp/configure.sh) failed within the chroot environment."
+        show_error "Logs within the chroot (if any) might be in /mnt/var/log or /mnt/tmp."
+        # Additional debug info can be added here if needed, e.g., tail of chroot script log
+        exit 1
+    fi
 
     if [[ -d "$(dirname "$0")/debs" ]] && ls "$(dirname "$0")/debs"/*.deb &>/dev/null; then
         show_progress "Installing local .deb packages..."
