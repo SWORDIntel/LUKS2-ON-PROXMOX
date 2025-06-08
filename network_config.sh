@@ -57,10 +57,10 @@ configure_network_early() {
 
     # Manual network setup using dialog
     log_debug "Preparing for manual network setup dialog."
-    local iface_array=("$ifaces") # This was ifaces already, not an array before.
+    # local iface_array=("$ifaces") # This variable was unused as the loop below iterates over 'ifaces' directly.
     local iface_options=()
     # Correctly iterate if ifaces is a space-separated string
-    for iface_item in $ifaces; do # Changed from iface_array to ifaces
+    for iface_item in $ifaces; do
         local status; status=$(ip link show "$iface_item" | grep -q "state UP" && echo "UP" || echo "DOWN")
         iface_options+=("$iface_item" "$iface_item ($status)")
     done

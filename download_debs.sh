@@ -35,9 +35,9 @@ while IFS= read -r url || [[ -n "$url" ]]; do
     continue
   fi
   echo "Downloading $url..."
-  wget -P "$TARGET_DIR" "$url"
-  if [ $? -ne 0 ]; then
-    echo "Error: Failed to download $url"
+  # shellcheck disable=SC2181
+  if ! wget -P "$TARGET_DIR" "$url"; then
+    echo "Error: Failed to download $url (wget exit status: $?)"
     # Continue to try downloading other packages
   else
     echo "Successfully downloaded $url to $TARGET_DIR"
