@@ -149,9 +149,15 @@ EOF
         echo "[PROXMOX_AIO_INSTALLER_CHROOT] Checking and installing YubiKey packages..." >> /dev/kmsg
         if [[ "${USE_YUBIKEY}" == "yes" ]]; then
             echo "[PROXMOX_AIO_INSTALLER_CHROOT] USE_YUBIKEY=yes. Installing yubikey-luks and dependencies." >> /dev/kmsg
-            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends yubikey-luks yubikey-manager libpam-yubico ykcs11 libykpers-1-1 libyubikey0 pcscd
-            echo "[PROXMOX_AIO_INSTALLER_CHROOT] YubiKey package installation attempt finished. Enabling pcscd service." >> /dev/kmsg
-            systemctl enable pcscd
+            if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends yubikey-luks yubikey-manager libpam-yubico ykcs11 libykpers-1-1 libyubikey0 pcscd; then
+                echo "[PROXMOX_AIO_INSTALLER_CHROOT] CRITICAL: Failed to install YubiKey packages. This is fatal for YubiKey setup." >> /dev/kmsg
+                exit 1 # Exit the chroot script
+            fi
+            echo "[PROXMOX_AIO_INSTALLER_CHROOT] YubiKey packages installed successfully. Enabling pcscd service." >> /dev/kmsg
+            if ! systemctl enable pcscd; then
+                echo "[PROXMOX_AIO_INSTALLER_CHROOT] WARNING: Failed to enable pcscd service. YubiKey might not work on boot." >> /dev/kmsg
+                # Decide if this should also be fatal. For now, make it a warning.
+            fi
         else
             echo "[PROXMOX_AIO_INSTALLER_CHROOT] USE_YUBIKEY=no. Skipping YubiKey package installation." >> /dev/kmsg
         fi
@@ -202,7 +208,7 @@ EOF
         local crypttab_options="luks,discard"
         if [[ "${USE_YUBIKEY}" == "yes" ]]; then
             echo "[PROXMOX_AIO_INSTALLER_CHROOT] YubiKey is enabled, adding keyscript to crypttab options." >> /dev/kmsg
-            crypttab_options+=",keyscript=/lib/cryptsetup/scripts/decrypt_yubikey"
+            crypttab_options+=",keyscript=/usr/share/yubikey-luks/ykluks-keyscript"
         fi
         echo "[PROXMOX_AIO_INSTALLER_CHROOT] crypttab_options set to: $crypttab_options" >> /dev/kmsg
 
