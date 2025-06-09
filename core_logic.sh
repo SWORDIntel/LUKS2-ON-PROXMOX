@@ -4,21 +4,7 @@
 # Core Logic Functions
 #############################################################
 
-# ANNOTATION: Helper function to provide a fallback if 'dialog' is not installed.
-# This is the single most important change for robustness in a minimal environment.
-_prompt_user_yes_no() {
-    local prompt_text="$1"
-    # local title="${2:-Confirmation}" # Title is no longer used
-    local yn
-    while true; do
-        read -r -p "$prompt_text [y/n]: " yn
-        case $yn in
-            [Yy]*) return 0 ;;
-            [Nn]*) return 1 ;;
-            *) echo "Please answer yes (y) or no (n)." >&2 ;;
-        esac
-    done
-}
+# (Function _prompt_user_yes_no is removed from here, now centralized in ui_functions.sh as prompt_yes_no)
 
 init_environment() {
     show_step "INIT" "Initializing Environment"
@@ -104,7 +90,7 @@ gather_user_options() {
 
     # Initialize default values for ZFS native encryption
     CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="no"
-    CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]="no"
+    CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]="no" 
     CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]="6" # Default slot
     CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-256-gcm"
 
@@ -113,10 +99,10 @@ gather_user_options() {
     # the logic loops more self-contained and robust.
 
     # ... The rest of the TUI logic for ZFS, network, etc. is excellent and can remain ...
-    # ... Just ensure any simple yes/no dialogs are replaced with _prompt_user_yes_no for robustness.
+    # ... Just ensure any simple yes/no dialogs are replaced with prompt_yes_no for robustness.
 
     # ZFS Native Encryption Prompts
-    if _prompt_user_yes_no "Enable native ZFS encryption for the root pool?" "ZFS Native Encryption"; then
+    if prompt_yes_no "Enable native ZFS encryption for the root pool?"; then # Titel "ZFS Native Encryption" ignored
         CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="yes"
         local alg_choice
         echo "Select ZFS encryption algorithm (aes-256-gcm is recommended):"
@@ -141,8 +127,8 @@ gather_user_options() {
 
     # Prompts for YubiKey for ZFS key if ZFS native encryption is enabled
     if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]}" == "yes" ]]; then
-        if _prompt_user_yes_no "Use a YubiKey to store and protect the ZFS native encryption key?
-(This will use a small dedicated LUKS partition on the primary disk, unlocked by YubiKey, to hold the ZFS pool key.)" "YubiKey for ZFS Key"; then
+        if prompt_yes_no "Use a YubiKey to store and protect the ZFS native encryption key?
+(This will use a small dedicated LUKS partition on the primary disk, unlocked by YubiKey, to hold the ZFS pool key.)"; then # Title "YubiKey for ZFS Key" ignored
             CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]="yes"
             log_debug "User opted to use YubiKey for ZFS native encryption key."
 
@@ -165,7 +151,7 @@ gather_user_options() {
     fi
 
     # Example for Clover prompt
-    if _prompt_user_yes_no "Install Clover bootloader on a separate drive?" "Clover Bootloader Support"; then
+    if prompt_yes_no "Install Clover bootloader on a separate drive?"; then # Title "Clover Bootloader Support" ignored
         # ... logic to select Clover disk ...
         CONFIG_VARS[USE_CLOVER]="yes"
     else
