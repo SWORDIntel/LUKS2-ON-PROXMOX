@@ -105,7 +105,7 @@ Package: *
 Pin: release n=bookworm,o=Proxmox
 Pin-Priority: 500
 EOF_PINNING
-
+        
         # --- Package Installation ---
         apt-get update
         export DEBIAN_FRONTEND=noninteractive
