@@ -124,7 +124,11 @@ run_installation_logic() {
     health_check "disks" true
     
     setup_luks_encryption
-    health_check "luks" true
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" != "yes" ]]; then
+        health_check "luks" true
+    else
+        log_info "ZFS Native Encryption selected, skipping LUKS health check."
+    fi
     
     setup_zfs_pool
     health_check "zfs" true

@@ -16,10 +16,26 @@ setup_zfs_pool() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     show_step "ZFS" "Creating ZFS Pool and Datasets"
     
-    # --- Parameter extraction and validation are excellent, no changes needed ---
+    # --- Parameter extraction and validation ---
     local pool_name="${CONFIG_VARS[ZFS_POOL_NAME]}"
     local raid_level="${CONFIG_VARS[ZFS_RAID_LEVEL]}"
-    local luks_devices=(); read -r -a luks_devices <<< "${CONFIG_VARS[LUKS_MAPPERS]}"
+
+    local zfs_target_devices_source_var="LUKS_MAPPERS" # Default to old behavior
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" ]]; then
+        log_info "ZFS Native Encryption selected. Using raw partitions for ZFS pool."
+        zfs_target_devices_source_var="LUKS_PARTITIONS" # Actually raw partitions
+    else
+        log_info "No ZFS Native Encryption (or LUKS selected). Using LUKS mappers for ZFS pool."
+    fi
+    local target_devices_str="${CONFIG_VARS[$zfs_target_devices_source_var]}"
+    local zfs_pool_target_devices=()
+    read -r -a zfs_pool_target_devices <<< "$target_devices_str"
+
+    if [[ ${#zfs_pool_target_devices[@]} -eq 0 ]]; then
+        show_error "No target devices found for ZFS pool from CONFIG_VARS[$zfs_target_devices_source_var]."
+        return 1
+    fi
+    log_debug "ZFS pool target devices: ${zfs_pool_target_devices[*]}"
     # ... etc ...
     # (All validation logic for device counts, etc., is kept as is)
 
@@ -38,8 +54,42 @@ setup_zfs_pool() {
 
     # ANNOTATION: Build the zpool create command using a Bash array for safety and clarity.
     # This avoids complex quoting issues and is safer than a raw `eval`.
+
+    local zfs_encryption_opts=()
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" ]]; then
+        local encryption_algorithm="${CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]:-aes-256-gcm}"
+        log_info "Enabling ZFS native encryption with algorithm: $encryption_algorithm"
+
+        # Prompt for ZFS passphrase
+        local zfs_pass
+        zfs_pass=$(dialog --title "ZFS Native Encryption Passphrase" --passwordbox "Enter new ZFS passphrase for pool '${CONFIG_VARS[ZFS_POOL_NAME]}':" 10 70 3>&1 1>&2 2>&3)
+        if [[ -z "$zfs_pass" ]]; then # Check if empty or user pressed Cancel
+            show_error "ZFS passphrase entry cancelled or empty."
+            return 1
+        fi
+
+        local zfs_pass_confirm
+        zfs_pass_confirm=$(dialog --title "ZFS Native Encryption Passphrase" --passwordbox "Confirm ZFS passphrase:" 10 70 3>&1 1>&2 2>&3)
+        if [[ "$zfs_pass" != "$zfs_pass_confirm" ]]; then
+            show_error "ZFS passphrases do not match."
+            return 1
+        fi
+        # Pass the passphrase via environment variable for zpool create
+        # This is a common method to avoid it appearing in process lists directly.
+        # Ensure ZFS_PASSPHRASE is unset after the command.
+        export ZFS_PASSPHRASE="$zfs_pass"
+
+        zfs_encryption_opts=(
+            -O encryption="$encryption_algorithm"
+            -O keyformat=passphrase
+            -O keylocation=prompt # Initramfs will prompt
+        )
+        log_debug "ZFS encryption options: ${zfs_encryption_opts[*]}"
+    fi
+
     local zpool_create_cmd=(
         zpool create -f
+        "${zfs_encryption_opts[@]}" # Add encryption options here
         -o ashift="${CONFIG_VARS[ZFS_ASHIFT]:-$ZFS_DEFAULT_ASHIFT}"
         -o autotrim=on
         -O acltype=posixacl
@@ -62,11 +112,11 @@ setup_zfs_pool() {
 
     # Add RAID level and devices
     case "$raid_level" in
-        "single") zpool_create_cmd+=("${luks_devices[0]}") ;;
-        "mirror") zpool_create_cmd+=(mirror "${luks_devices[@]}") ;;
-        "raidz1"|"raidz") zpool_create_cmd+=(raidz1 "${luks_devices[@]}") ;;
-        "raidz2") zpool_create_cmd+=(raidz2 "${luks_devices[@]}") ;;
-        "raidz3") zpool_create_cmd+=(raidz3 "${luks_devices[@]}") ;;
+        "single") zpool_create_cmd+=("${zfs_pool_target_devices[0]}") ;;
+        "mirror") zpool_create_cmd+=(mirror "${zfs_pool_target_devices[@]}") ;;
+        "raidz1"|"raidz") zpool_create_cmd+=(raidz1 "${zfs_pool_target_devices[@]}") ;;
+        "raidz2") zpool_create_cmd+=(raidz2 "${zfs_pool_target_devices[@]}") ;;
+        "raidz3") zpool_create_cmd+=(raidz3 "${zfs_pool_target_devices[@]}") ;;
         *) show_error "Unknown RAID level: $raid_level" && return 1 ;;
     esac
 
@@ -87,7 +137,16 @@ setup_zfs_pool() {
     show_progress "Creating ZFS pool '$pool_name'..."
     if ! "${zpool_create_cmd[@]}" &>> "$LOG_FILE"; then
         show_error "Failed to create ZFS pool. Check logs for details."
+        if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" ]]; then
+            unset ZFS_PASSPHRASE
+            log_debug "ZFS_PASSPHRASE environment variable unset after failure."
+        fi
         return 1
+    fi
+
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" ]]; then
+        unset ZFS_PASSPHRASE
+        log_debug "ZFS_PASSPHRASE environment variable unset."
     fi
 
     # Verify the pool (logic is good)

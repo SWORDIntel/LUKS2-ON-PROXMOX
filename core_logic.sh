@@ -114,88 +114,40 @@ gather_user_options() {
         exit 1
     fi
 
+    # Initialize default values for ZFS native encryption
+    CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="no"
+    CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-256-gcm"
+
     # --- ZFS, Encryption, Clover, and Network TUIs ---
     # The original script's dialog-based TUI is very comprehensive. The key is to make
     # the logic loops more self-contained and robust.
 
-    # ANNOTATION: The "Detached Headers" section is refactored into a self-contained loop.
-    # This avoids the fragile pattern of returning and having the caller re-run the function.
-    CONFIG_VARS[USE_DETACHED_HEADERS]="no" # Default
-    while true; do
-        local encryption_menu_choice
-        encryption_menu_choice=$(dialog --title "Encryption Options" --menu "Choose how LUKS headers are stored:" 18 70 3 \
-            1 "Standard: LUKS headers on data disks" \
-            2 "Detached: LUKS headers on a separate disk (Enhanced Security)" \
-            3 "Help: Explain Detached Header Mode" 3>&1 1>&2 2>&3) || { show_error "Selection cancelled."; exit 1; }
-
-        case "$encryption_menu_choice" in
-            1)
-                CONFIG_VARS[USE_DETACHED_HEADERS]="no"
-                break # Exit the loop and continue
-                ;;
-            2)
-                # This logic is now nested inside the main loop.
-                local all_zfs_disks_str="${CONFIG_VARS[ZFS_TARGET_DISKS]}"
-                local header_disk_options=()
-                # Find available disks for headers
-                while read -r name size model; do
-                    if ! grep -q -w "/dev/$name" <<< "$all_zfs_disks_str"; then
-                        header_disk_options+=("/dev/$name" "$name ($size, $model)" "off")
-                    fi
-                done < <(lsblk -dno NAME,SIZE,MODEL | grep -v "loop\|sr" | sort)
-
-                if [[ ${#header_disk_options[@]} -eq 0 ]]; then
-                    dialog --title "No Suitable Drives" --msgbox "No separate drives were found for detached headers. Please attach one or choose Standard mode." 10 70
-                    continue # Go back to the encryption menu
-                fi
-
-                local header_disk
-                header_disk=$(dialog --title "Header Disk" --radiolist "Select a drive for LUKS headers:" 15 70 $((${#header_disk_options[@]}/3)) "${header_disk_options[@]}" 3>&1 1>&2 2>&3)
-                if [[ $? -ne 0 ]]; then continue; fi # User cancelled, go back to encryption menu
-
-                # Ask to format or use existing
-                if (dialog --title "Header Disk Setup" --yesno "Format ${header_disk} with a new partition for headers?" 10 70); then
-                    CONFIG_VARS[USE_DETACHED_HEADERS]="yes"
-                    CONFIG_VARS[HEADER_DISK]="$header_disk"
-                    CONFIG_VARS[FORMAT_HEADER_DISK]="yes"
-                    break # Success! Exit the loop.
-                else
-                    local header_part
-                    header_part=$(dialog --title "Header Partition" --inputbox "Enter existing partition (e.g., /dev/sdb1):" 10 70 3>&1 1>&2 2>&3)
-                    if [[ $? -ne 0 ]]; then continue; fi # User cancelled, go back to encryption menu
-
-                    if [[ -b "$header_part" ]]; then
-                        CONFIG_VARS[USE_DETACHED_HEADERS]="yes"
-                        CONFIG_VARS[HEADER_DISK]="$header_disk"
-                        CONFIG_VARS[FORMAT_HEADER_DISK]="no"
-                        CONFIG_VARS[HEADER_PART_DEVICE]="$header_part"
-                        break # Success! Exit the loop.
-                    else
-                        dialog --title "Invalid Input" --msgbox "Device '$header_part' is not a valid block device. Please try again." 8 70
-                        continue # Invalid input, go back to encryption menu
-                    fi
-                fi
-                ;;
-            3)
-                dialog --title "Explanation" --msgbox "Detached Headers store encryption keys on a separate, removable drive (like a USB stick). If your main server is stolen, the data is unreadable without this key drive. WARNING: If you lose the key drive, your data is permanently lost." 20 70
-                continue # Show help, then return to the menu
-                ;;
-        esac
-    done # End of self-contained encryption menu loop
-
-    # ANNOTATION: Use the new robust prompt for yes/no questions.
-    if [[ "${YUBIKEY_DETECTED:-false}" == "true" ]]; then
-        if _prompt_user_yes_no "A YubiKey was detected. Use it to secure LUKS encryption?" "YubiKey LUKS Protection"; then
-            CONFIG_VARS[USE_YUBIKEY]="yes"
-            log_debug "User opted to use YubiKey for LUKS."
-        else
-            CONFIG_VARS[USE_YUBIKEY]="no"
-            log_debug "User opted not to use YubiKey for LUKS."
-        fi
-    fi
-    
     # ... The rest of the TUI logic for ZFS, network, etc. is excellent and can remain ...
     # ... Just ensure any simple yes/no dialogs are replaced with _prompt_user_yes_no for robustness.
+
+    # ZFS Native Encryption Prompts
+    if _prompt_user_yes_no "Enable native ZFS encryption for the root pool?" "ZFS Native Encryption"; then
+        CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="yes"
+        local zfs_encryption_algorithm
+        zfs_encryption_algorithm=$(dialog --title "ZFS Encryption Algorithm" --radiolist "Select ZFS encryption algorithm (aes-256-gcm is recommended):" 15 70 5 \
+            "aes-256-gcm" "AES 256 GCM (Recommended)" "on" \
+            "aes-128-gcm" "AES 128 GCM" "off" \
+            "aes-256-ccm" "AES 256 CCM" "off" \
+            "aes-128-ccm" "AES 128 CCM" "off" \
+            "off"         "Disable (should not happen if previous step was yes)" "off" \
+            3>&1 1>&2 2>&3) || { show_error "Selection cancelled. Defaulting to aes-256-gcm."; zfs_encryption_algorithm="aes-256-gcm"; }
+
+        if [[ "$zfs_encryption_algorithm" == "off" ]]; then
+            log_debug "User selected 'off' for ZFS encryption algorithm after enabling it. Defaulting to aes-256-gcm."
+            CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-256-gcm"
+        else
+            CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="$zfs_encryption_algorithm"
+        fi
+        log_debug "User opted to use ZFS native encryption with algorithm: ${CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]}."
+    else
+        CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="no"
+        log_debug "User opted not to use ZFS native encryption."
+    fi
 
     # Example for Clover prompt
     if _prompt_user_yes_no "Install Clover bootloader on a separate drive?" "Clover Bootloader Support"; then

@@ -3,6 +3,19 @@
 
 setup_luks_encryption() {
     log_debug "Entering function: ${FUNCNAME[0]}"
+
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" ]]; then
+        log_info "ZFS Native Encryption is selected. Skipping LUKS setup."
+        # Important: We need to ensure that zfs_logic.sh gets the correct raw partitions.
+        # The raw partitions are already in CONFIG_VARS[LUKS_PARTITIONS].
+        # We will modify zfs_logic.sh in a later step to use CONFIG_VARS[LUKS_PARTITIONS] directly
+        # when ZFS_NATIVE_ENCRYPTION is "yes".
+        # So, this function should not populate CONFIG_VARS[LUKS_MAPPERS] in this case.
+        # It should also not perform any LUKS operations (formatting, opening, YubiKey).
+        CONFIG_VARS[LUKS_MAPPERS]="" # Ensure it's empty if LUKS is skipped.
+        return 0 # Exit the function successfully.
+    fi
+
     show_step "ENCRYPT" "Setting up LUKS Encryption"
 
     local luks_partitions_arr=()
@@ -142,6 +155,12 @@ setup_luks_encryption() {
 
 backup_luks_header() {
     log_debug "Entering function: ${FUNCNAME[0]}"
+
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" ]]; then
+        log_info "ZFS Native Encryption is selected. Skipping LUKS header backup."
+        return 0 # Exit the function successfully.
+    fi
+
     show_step "BACKUP" "Backing Up LUKS Headers"
 
     log_debug "Prompting user whether to backup LUKS headers."
