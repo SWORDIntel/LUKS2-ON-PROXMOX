@@ -88,3 +88,58 @@ show_warning() {
     # ANNOTATION: Placed the warning icon before the text for better visual flow.
     printf "  %s%s %s%s\n" "${YELLOW}" "${WARN_ICON}" "$1" "${RESET}"
 }
+
+# Prompts the user with a yes/no question.
+# Usage: prompt_yes_no "Your question here?"
+# Returns: 0 for Yes, 1 for No.
+prompt_yes_no() {
+    local prompt_text="$1"
+    local yn
+    while true; do
+        read -r -p "$prompt_text [y/n]: " yn
+        case $yn in
+            [Yy]*) return 0 ;;
+            [Nn]*) return 1 ;;
+            *) echo "Please answer yes (y) or no (n)." >&2 ;;
+        esac
+    done
+}
+
+# Prompts the user to select an option from a list.
+# Usage: _select_option_from_list "Prompt for user:" SELECTED_VAR_NAME "Option 1" "Option 2" "Option 3" ... "Cancel"
+# The selected option string is stored in the variable name provided by SELECTED_VAR_NAME.
+# Returns: 0 on successful selection, 1 if cancelled or error.
+_select_option_from_list() {
+    local prompt_text="$1"
+    local -n result_var_name="$2" # Indirect variable reference (nameref)
+    shift 2 # Remove prompt and result_var_name from arguments, leaving only options
+    local options=("$@")
+    local num_options=${#options[@]}
+    local choice
+
+    if [[ $num_options -eq 0 ]]; then
+        show_error "_select_option_from_list: No options provided."
+        return 1
+    fi
+
+    echo # Newline for clarity
+    echo "$prompt_text"
+    for i in $(seq 0 $((num_options - 1))); do
+        echo "  $((i + 1)). ${options[$i]}"
+    done
+
+    while true; do
+        read -r -p "Enter choice [1-$num_options]: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le $num_options ]]; then
+            result_var_name="${options[$((choice - 1))]}"
+            # Check if the selected option is "Cancel" (case-insensitive)
+            if [[ "$(echo "${result_var_name}" | tr '[:upper:]' '[:lower:]')" == "cancel" ]]; then
+                log_debug "Selection cancelled by user choosing 'Cancel' option."
+                return 1 # Treat "Cancel" option as a failure/cancel return
+            fi
+            return 0 # Success
+        else
+            show_warning "Invalid selection. Please enter a number between 1 and $num_options."
+        fi
+    done
+}
