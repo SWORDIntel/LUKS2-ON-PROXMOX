@@ -1,4 +1,4 @@
-# Proxmox VE Advanced Installer with ZFS on LUKS
+# Proxmox VE Advanced Installer with ZFS on LUKS - STILLLLLLLL BROKEN AS OF THIS TIME
 
 A customizable, robust, and comprehensive installer script for setting up Proxmox VE with advanced features including RAM-based installation, ZFS on LUKS encryption, health checks, and extensive validation capabilities.
 
