@@ -34,7 +34,7 @@ setup_yubikey_luks_partition() {
     log_debug "YubiKey LUKS key partition: $yubikey_key_part"
 
     local yk_luks_pass yk_luks_pass_confirm
-
+    
     yk_luks_pass=$(dialog --title "YubiKey LUKS Key Partition Passphrase" --passwordbox "Enter a NEW passphrase for the YubiKey-protected ZFS key partition ($yubikey_key_part):" 10 70 3>&1 1>&2 2>&3) || { log_debug "YubiKey LUKS passphrase entry cancelled."; return 1; }
     yk_luks_pass_confirm=$(dialog --title "Confirm Passphrase" --passwordbox "Confirm passphrase for YubiKey LUKS key partition:" 10 70 3>&1 1>&2 2>&3) || { log_debug "YubiKey LUKS passphrase confirmation cancelled."; return 1; }
 
@@ -43,7 +43,7 @@ setup_yubikey_luks_partition() {
         show_error "Passphrases for YubiKey LUKS partition do not match or are empty."
         return 1
     fi
-
+    
     show_progress "Formatting $yubikey_key_part as LUKS2..."
     log_debug "Executing: cryptsetup luksFormat --type luks2 "$yubikey_key_part""
     echo -n "$yk_luks_pass" | cryptsetup luksFormat --type luks2 "$yubikey_key_part" - >> "$LOG_FILE" 2>&1
@@ -53,7 +53,7 @@ setup_yubikey_luks_partition() {
         return 1
     fi
     show_success "$yubikey_key_part formatted for LUKS."
-
+    
     local yk_slot_for_zfs_key="${CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]:-6}" # Default to slot 6, can be configured
     dialog --title "YubiKey Enrollment for ZFS Key" --infobox "Preparing to enroll YubiKey (slot $yk_slot_for_zfs_key) for LUKS partition $yubikey_key_part.
 
@@ -95,7 +95,7 @@ Do you want to continue with passphrase-only for this ZFS key partition, or canc
         show_error "Failed to open YubiKey LUKS partition $yubikey_key_part (tried YubiKey and passphrase)."
         return 1
     fi
-
+    
     local mapped_partition="/dev/mapper/$mapper_name"
     show_progress "Formatting $mapped_partition as ext4..."
     mkfs.ext4 -F "$mapped_partition" >> "$LOG_FILE" 2>&1
@@ -123,7 +123,7 @@ Do you want to continue with passphrase-only for this ZFS key partition, or canc
     mkdir -p "$temp_mount_point/keys"
     local zfs_keyfile_on_luks="$temp_mount_point/keys/zfs.key"
     # Path relative to the LUKS partition root, for use in initramfs script
-    CONFIG_VARS[ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS]="/keys/zfs.key"
+    CONFIG_VARS[ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS]="/keys/zfs.key" 
 
     show_progress "Generating ZFS keyfile at $zfs_keyfile_on_luks..."
     openssl rand 32 > "$zfs_keyfile_on_luks"
@@ -135,7 +135,7 @@ Do you want to continue with passphrase-only for this ZFS key partition, or canc
         rm -rf "$temp_mount_point"
         return 1
     fi
-    chmod 0400 "$zfs_keyfile_on_luks"
+    chmod 0400 "$zfs_keyfile_on_luks" 
     show_success "ZFS keyfile generated: $zfs_keyfile_on_luks."
     log_info "ZFS key will be stored at ${CONFIG_VARS[ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS]} within the YubiKey LUKS partition."
 
@@ -146,14 +146,14 @@ Do you want to continue with passphrase-only for this ZFS key partition, or canc
         log_warning "Failed to unmount $temp_mount_point. Continuing, but this might indicate an issue."
     fi
     rm -rf "$temp_mount_point"
-
+    
     show_progress "Closing LUKS mapper $mapper_name..."
     sync # Ensure data is written before closing
     cryptsetup close "$mapper_name" >> "$LOG_FILE" 2>&1
     if [[ $? -ne 0 ]]; then
         log_warning "Failed to close LUKS mapper $mapper_name. Continuing, but this might indicate an issue."
     fi
-
+    
     show_success "YubiKey LUKS partition for ZFS key setup complete for $yubikey_key_part."
     log_debug "Exiting function: ${FUNCNAME[0]} (yubikey_setup.sh)"
     return 0
