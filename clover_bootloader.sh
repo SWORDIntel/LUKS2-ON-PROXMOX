@@ -7,22 +7,16 @@
 # Usage: if _prompt_user_yes_no "Continue?"; then ...; fi
 _prompt_user_yes_no() {
     local prompt_text="$1"
-    local title="${2:-Confirmation}"
-    # If dialog is available, use it.
-    if command -v dialog &>/dev/null; then
-        dialog --title "$title" --yesno "$prompt_text" 10 70
-        return $?
-    else
-        # Fallback to simple terminal read.
-        while true; do
-            read -p "$prompt_text [y/n]: " yn
-            case $yn in
-                [Yy]*) return 0 ;; # Success (like "Yes" in dialog)
-                [Nn]*) return 1 ;; # Failure (like "No" in dialog)
-                *) echo "Please answer yes or no." ;;
-            esac
-        done
-    fi
+    # The 'title' variable is no longer used as 'read' doesn't support titles.
+    # Fallback to simple terminal read.
+    while true; do
+        read -r -p "$prompt_text [y/n]: " yn # Added -r for robustness
+        case $yn in
+            [Yy]*) return 0 ;; # Success
+            [Nn]*) return 1 ;; # Failure
+            *) echo "Please answer yes or no." >&2 ;; # Error to stderr
+        esac
+    done
 }
 
 

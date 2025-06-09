@@ -243,7 +243,7 @@ check_zfs_pool_health() {
     fi
     
     # Check pool scrub (optional, but good for initial verification)
-    if dialog --title "ZFS Health Verification" --yesno "Would you like to perform a scrub on ZFS pool $pool_name to verify data integrity?\n\nThis will take some time but helps ensure your storage is correctly configured." 10 70; then
+    if prompt_yes_no "Would you like to perform a scrub on ZFS pool $pool_name to verify data integrity?\n\nThis will take some time but helps ensure your storage is correctly configured."; then
         zpool scrub "$pool_name"
         log_info "ZFS pool scrub initiated - check 'zpool status' later for results"
         log_success "ZFS scrub started on $pool_name"

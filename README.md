@@ -1,27 +1,24 @@
-# Proxmox VE Advanced Installer with ZFS Native Encryption - STILLLLLLLL BROKEN AS OF THIS TIME
+# Proxmox VE Advanced Installer with ZFS on LUKS - STILLLLLLLL BROKEN AS OF THIS TIME
 
-A customizable, robust, and comprehensive installer script for setting up Proxmox VE with advanced features including RAM-based installation, ZFS native encryption for the root filesystem, health checks, and extensive validation capabilities.
+A customizable, robust, and comprehensive installer script for setting up Proxmox VE with advanced features including RAM-based installation, ZFS on LUKS encryption, health checks, and extensive validation capabilities.
 
 ## Features
 
 ### Core Installation Features
 
-* **ZFS Native Encryption for Root Filesystem:** Installs Proxmox VE with a ZFS root filesystem utilizing ZFS native encryption for enhanced security and reliability.
-  * Supports passphrase-based encryption for the ZFS pool.
-  * Optionally supports keyfile-based encryption, where the keyfile can be protected by a YubiKey (potentially on a small, separate LUKS-encrypted partition).
+* **ZFS Root on LUKS:** Installs Proxmox VE with a ZFS root filesystem on top of LUKS encrypted disks for enhanced security and reliability.
   * **Flexible Disk Support:** Handles multiple disk configurations including mirrored pools, single disk setups, and RAIDz variants.
   * **Optimized ZFS Performance:** Configures ZFS parameters for optimal performance based on your hardware profile.
-  * **Automatic Pool Creation:** Creates and configures ZFS pools with best-practice settings, encryption, and mountpoints.
+  * **Automatic Pool Creation:** Creates and configures ZFS pools with best-practice settings and mountpoints.
 
-* **YubiKey Integration:** Enhance security by using a YubiKey.
-  * **Keyfile Protection:** The YubiKey can be used to unlock a LUKS-encrypted partition that stores the keyfile for ZFS native encryption. This adds a hardware-backed layer to your ZFS encryption.
-  * **Interactive Enrollment:** Guided YubiKey setup and enrollment during installation for the LUKS-protected keyfile.
-  * **Fallback Options:** Configures passphrase fallback for recovery scenarios (for the LUKS-protected keyfile or direct ZFS passphrase).
+* **YubiKey Integration:** Secure your LUKS encryption with a YubiKey for two-factor authentication.
+  * **Hardware-Based Security:** The YubiKey acts as an additional factor for unlocking encrypted drives at boot.
+  * **Interactive Enrollment:** Guided YubiKey setup and enrollment during installation.
+  * **Fallback Options:** Configures passphrase fallback for recovery scenarios.
 
 * **Bootloader Options:**
-  * **GRUB (Default):** Standard EFI bootloader installed on the target system's EFI partition with ZFS support.
+  * **GRUB (Default):** Standard EFI bootloader installed on the target system's EFI partition with LUKS/ZFS support.
   * **Clover (Optional):** Install the Clover bootloader to a separate drive (e.g., USB stick) for systems where primary storage isn't directly bootable.
-  * **ZFSBootMenu (Optional):** Install ZFSBootMenu to a separate drive (e.g., USB stick). ZFSBootMenu provides a command-line environment that can scan for ZFS pools, identify bootable ZFS datasets, and boot Linux kernels directly from those datasets. It's particularly useful for flexible ZFS boot environment management. More details at [https://docs.zfsbootmenu.org/en/v3.0.x/](https://docs.zfsbootmenu.org/en/v3.0.x/).
 
 ### Installation Environment
 
@@ -59,17 +56,15 @@ A customizable, robust, and comprehensive installer script for setting up Proxmo
 
 * **Comprehensive Final Check:**
   * **End-to-End Verification:** Performs final system-wide health assessment.
-  * **Component Testing:** Validates disks, ZFS, system files, network, and LUKS (if used for keyfile encryption).
+  * **Component Testing:** Validates disks, LUKS, ZFS, system files, and network.
   * **Detailed Results:** Provides actionable information on any detected issues.
 
 ### Usability & Control
 
-The installer offers flexible control methods, supporting both interactive guided setup via a Text-based User Interface (TUI) and non-interactive automated deployments through command-line arguments and configuration files.
-
 * **Configuration Options:**
-  * **Command-Line Arguments:** Extensive CLI options for controlling installation behavior, suitable for scripting and automation.
-  * **Configuration Files:** Support for pre-defined configuration files for fully unattended installation.
-  * **Interactive Dialogs (TUI):** When run without automation flags, provides user-friendly dialogs (using utilities like `dialog`) for guided setup.
+  * **Command-Line Arguments:** Extensive CLI options for controlling installation behavior.
+  * **Configuration Files:** Support for pre-defined configuration files for unattended installation.
+  * **Interactive Dialogs:** User-friendly dialogs for guided installation when needed.
 
 * **Robust Error Handling:**
   * **Comprehensive Logging:** Detailed logs of all installation steps and decisions.
@@ -80,15 +75,14 @@ The installer offers flexible control methods, supporting both interactive guide
   * **Component Separation:** Clean separation of concerns for maintainability.
   * **Extension Points:** Easy addition of new features through modular architecture.
   * **Script Independence:** Individual modules can be used standalone for specific tasks.
-    *   **Local .deb Package Cache:** If required Debian packages are not available in the installation environment (e.g., air-gapped setup), the script can download them if an internet connection is present initially. These are stored in a `debs` subdirectory. This includes all necessary packages for features like ZFS, (optionally LUKS for keyfile encryption), and YubiKey support.
+    *   **Local .deb Package Cache:** If required Debian packages are not available in the installation environment (e.g., air-gapped setup), the script can download them if an internet connection is present initially. These are stored in a `debs` subdirectory. This includes all necessary packages for features like ZFS, LUKS, and YubiKey support.
     *   The installer can then use these cached .deb packages to install Proxmox VE and its dependencies without internet access.
-*   **Configuration Management (Interaction Modes):**
-    *   **Interactive Mode (TUI):** Utilizes text-based dialogs (e.g., via the `dialog` utility) to guide users through all installation choices. This is the default mode when no automation flags are provided.
-    *   **Non-Interactive Mode:** Achieved using command-line arguments or by providing a comprehensive configuration file.
-    *   **Save/Load Configuration:** Facilitates transitioning from an interactive setup to an automated one by allowing users to save settings from the TUI into a configuration file.
+*   **Configuration Management:**
+    *   **Text-based User Interface (TUI):** Guided dialogs for all installation options.
+    *   **Save/Load Configuration:** Option to save all selected installation settings to a configuration file. This file can be used for non-interactive, automated deployments.
 *   **Security & Robustness:**
     *   Detailed logging of the installation process.
-    *   Utility for backing up critical encryption information (e.g., LUKS header for keyfile partition, ZFS encryption keys if managed externally).
+    *   LUKS header backup utility to a separate removable device.
     *   Clear warnings for destructive operations.
     *   Error handling for critical steps.
 
@@ -98,10 +92,9 @@ The installer offers flexible control methods, supporting both interactive guide
 *   x86_64 architecture.
 *   Minimum 4GB RAM (more recommended, especially if using RAM disk pivot).
 *   Target disks for Proxmox VE installation.
-*   Optional: A separate small USB drive if using it to store a LUKS-encrypted keyfile for ZFS native encryption.
+*   Optional: A separate small USB drive for detached LUKS headers if that mode is chosen.
 *   Optional: A separate small USB drive for Clover bootloader if that option is chosen.
-*   Optional: A separate small USB drive for ZFSBootMenu if that option is chosen.
-*   Optional: A YubiKey, if used to protect the LUKS-encrypted keyfile for ZFS native encryption.
+*   Optional: A YubiKey for LUKS YubiKey protection.
 *   Proxmox VE compatible hardware.
 *   Internet connection (for initial .deb package download if not already cached, and for Proxmox/Debian repositories during installation unless all packages are cached).
 
@@ -141,7 +134,7 @@ Validation mode allows you to verify system compatibility and configuration with
 * Verifying hardware compatibility
 * Checking disk configurations
 * Testing network settings
-* Validating ZFS (and optionally LUKS for keyfile) configurations
+* Validating ZFS and LUKS configurations
 
 To use validation mode:
 
@@ -155,8 +148,8 @@ This will generate a detailed validation report showing all checks performed and
 
 The installer performs comprehensive health checks at key points during the installation process:
 
-* After encryption setup (ZFS native, or LUKS for keyfile) - Validates encryption configuration
-* After ZFS setup - Checks pool status and health (including encryption status)
+* After LUKS setup - Validates encryption configuration
+* After ZFS setup - Checks pool status and health
 * After system file installation - Verifies critical system files
 * After bootloader installation - Ensures boot configuration is correct
 * After network configuration - Tests connectivity
@@ -172,8 +165,8 @@ The installer is built with a modular architecture:
 * `validation_module.sh` - System compatibility and configuration validation
 * `health_checks.sh` - Post-installation verification and health checks
 * `smart_tools.sh` - SMART disk diagnostic tools
-* `zfs_setup.sh` - ZFS pool creation and configuration (including native encryption)
-* `luks_setup.sh` - LUKS encryption setup (primarily for ZFS keyfiles if used)
+* `zfs_setup.sh` - ZFS pool creation and configuration
+* `luks_setup.sh` - LUKS encryption setup
 * `network_setup.sh` - Network configuration
 * `ramdisk_setup.sh` - RAM environment preparation
 * `bootloader_setup.sh` - Bootloader installation and configuration
@@ -192,21 +185,13 @@ ZFS_POOL_NAME=rpool
 ZFS_RAID_TYPE=mirror       # single, mirror, raidz1, raidz2
 ZFS_ASHIFT=12             # 9=512B, 12=4KB, 13=8KB sectors
 
-# ZFS Native Encryption configuration
-ZFS_NATIVE_ENCRYPTION=yes  # Enable ZFS native encryption for the root pool
-# ZFS_ENCRYPTION_PASSPHRASE_ONCE=yes # Ask for passphrase only once during setup, then use a keyfile
-ZFS_ENCRYPTION_ALGORITHM=aes-256-gcm # Encryption algorithm
-# KEYFILE_LUKS_ENCRYPTED=yes # Set to yes if the ZFS keyfile is on a LUKS encrypted partition
-# KEYFILE_LUKS_DRIVE=/dev/sdx # Device for the LUKS encrypted keyfile
-# USE_YUBIKEY_FOR_ZFS_KEY=yes # Use YubiKey to unlock the LUKS partition containing the ZFS keyfile
-
-# LUKS configuration (Legacy - primarily for ZFS keyfile encryption if used, not for root FS)
-# USE_LUKS=true             # Set to true if using LUKS for ZFS keyfile encryption
-# DETACHED_HEADER=false     # Whether to use detached headers for the keyfile's LUKS partition
-# LUKS_HEADER_DRIVE=/dev/sdc # Only used if DETACHED_HEADER=true for the keyfile's LUKS partition
+# LUKS configuration
+USE_LUKS=true
+DETACHED_HEADER=false     # Whether to use detached headers
+LUKS_HEADER_DRIVE=/dev/sdc # Only used if DETACHED_HEADER=true
 
 # YubiKey configuration
-USE_YUBIKEY=false         # Enable YubiKey integration (e.g., for unlocking the LUKS-encrypted ZFS keyfile)
+USE_YUBIKEY=false         # Enable YubiKey integration
 
 # Network configuration
 NETWORK_MODE=dhcp        # dhcp or static
@@ -217,6 +202,4 @@ DNS_SERVERS=8.8.8.8,1.1.1.1
 # Bootloader configuration
 USE_CLOVER=false          # Use Clover bootloader
 CLOVER_DRIVE=/dev/sdd     # Drive for Clover bootloader
-USE_ZFSBOOTMENU=false     # Use ZFSBootMenu bootloader
-ZFSBOOTMENU_DRIVE=/dev/sde # Drive for ZFSBootMenu (only if USE_ZFSBOOTMENU=true)
 ```

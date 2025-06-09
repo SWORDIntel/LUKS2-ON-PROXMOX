@@ -22,12 +22,12 @@ run_smart_check() {
     fi
     
     # Run SMART self-test
-    if dialog --title "SMART Quick Test" --yesno "Would you like to run a SMART short self-test on $disk?" 8 60; then
+    if prompt_yes_no "Would you like to run a SMART short self-test on $disk?"; then
         log_info "Running SMART short self-test on $disk"
         smartctl -t short "$disk"
         
         # Wait for test completion (typically 2 minutes or less)
-        dialog --title "SMART Test Running" --infobox "SMART short test is running on $disk. Please wait..." 5 60
+        show_progress "SMART short test is running on $disk. Please wait..."
         sleep 120
         
         # Read test results

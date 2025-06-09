@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+set -ue # Exit on unset variables and errors
+
+echo "SCRIPT_STARTED_STDOUT_TOP"
+echo "SCRIPT_STARTED_STDERR_TOP" >&2
+
 # Determine the script's absolute directory for robust sourcing
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -20,6 +25,60 @@ else
         echo "Warning: UI functions may not be available." >&2
         # exit 1 # Uncomment if UI is absolutely critical for all uses of this script
     fi
+fi
+
+# Helper function to check if an item is in a list (array)
+# Usage: is_package_in_list "item_to_find" "${array[@]}"
+is_package_in_list() {
+    local item="$1"
+    shift
+    local arr=("$@")
+    for element in "${arr[@]}"; do
+        if [[ "$element" == "$item" ]]; then
+            return 0 # Found
+        fi
+    done
+    return 1 # Not found
+}
+
+# Fallback logging functions if ui_functions.sh is not available or fails
+if ! command -v log_info &> /dev/null; then
+    # SCRIPT_DIR is determined at the top of the script
+    _FALLBACK_LOG_TARGET_DIR="${SCRIPT_DIR:-/tmp}" # Default to /tmp if SCRIPT_DIR is somehow empty
+    _FALLBACK_LOG_TARGET="${_FALLBACK_LOG_TARGET_DIR}/package_management_fallback.log"
+
+    # Announce fallback activation and target (to stderr, so it's visible in script_output.log)
+    echo "DEBUG: SCRIPT_DIR='${SCRIPT_DIR}' (used for fallback log path)" >&2
+    echo "UI functions not fully loaded or log_info not found. Defining ALL fallback logging functions." >&2
+    echo "Fallback log target: ${_FALLBACK_LOG_TARGET}" >&2
+    
+    # Ensure log directory exists and perform a test write
+    mkdir -p "$(dirname "$_FALLBACK_LOG_TARGET")"
+    echo "[TEST_WRITE] $(date '+%Y-%m-%d %H:%M:%S') - Fallback logger initializing. Target: ${_FALLBACK_LOG_TARGET}" >> "$_FALLBACK_LOG_TARGET"
+    if [[ $? -eq 0 ]]; then
+        echo "Fallback log test write SUCCEEDED." >&2
+    else
+        echo "Fallback log test write FAILED. Fallback logging to file will not work." >&2
+    fi
+
+    # Define all core logging functions to use the fallback target
+    log_info() { echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - $*" >> "$_FALLBACK_LOG_TARGET"; }
+    log_debug() { echo "[DEBUG] $(date '+%Y-%m-%d %H:%M:%S') - $*" >> "$_FALLBACK_LOG_TARGET"; }
+    log_warning() { echo "[WARNING] $(date '+%Y-%m-%d %H:%M:%S') - $*" >> "$_FALLBACK_LOG_TARGET"; }
+    log_error() { echo "[ERROR] $(date '+%Y-%m-%d %H:%M:%S') - $*" >> "$_FALLBACK_LOG_TARGET"; }
+    
+    # Define all UI feedback functions (show_*) to echo formatted message to stdout and call log_info for file logging
+    show_step() { echo "==> $(date '+%Y-%m-%d %H:%M:%S') - $*" >&1; log_info "STEP: $*"; }
+    show_success() { echo "✓ $(date '+%Y-%m-%d %H:%M:%S') - $*" >&1; log_info "SUCCESS: $*"; }
+    show_error() { echo "✗ $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; log_info "ERROR_UI: $*"; }
+    show_warning() { echo "! $(date '+%Y-%m-%d %H:%M:%S') - $*" >&1; log_info "WARNING_UI: $*"; }
+    show_progress() { echo "  -> $(date '+%Y-%m-%d %H:%M:%S') - $*" >&1; log_info "PROGRESS: $*"; }
+    
+    # Define *_stdout functions to call their respective show_* primary functions
+    show_step_stdout() { show_step "$*"; }
+    show_success_stdout() { show_success "$*"; }
+    show_error_stdout() { show_error "$*"; }
+    show_warning_stdout() { show_warning "$*"; }
 fi
 
 # --- APT Configuration Management for populate_offline_cache ---
@@ -253,7 +312,7 @@ BASE_PACKAGES_COMMON=(
     cryptsetup-bin debootstrap wget curl gdisk rsync usbutils pv
 )
 
-if [[ "${PROXMOX_ZFS_DETECTED}" == "true" ]]; then
+if [[ "${PROXMOX_ZFS_DETECTED:-false}" == "true" ]]; then
     log_info "Proxmox environment detected. Adjusting BASE_PACKAGES to exclude GRUB."
     BASE_PACKAGES=("${BASE_PACKAGES_COMMON[@]}")
 else
@@ -264,7 +323,7 @@ else
 fi
 
 # ZFS-related packages
-if [[ "${PROXMOX_ZFS_DETECTED}" == "true" ]]; then
+if [[ "${PROXMOX_ZFS_DETECTED:-false}" == "true" ]]; then
     log_info "Proxmox environment detected. ZFS packages will be managed by Proxmox."
     ZFS_PACKAGES=()
     # If this script specifically needs to ensure zfs-zed is running and configured
