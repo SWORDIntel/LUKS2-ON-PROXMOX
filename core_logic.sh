@@ -8,21 +8,16 @@
 # This is the single most important change for robustness in a minimal environment.
 _prompt_user_yes_no() {
     local prompt_text="$1"
-    local title="${2:-Confirmation}"
-    if command -v dialog &>/dev/null; then
-        dialog --title "$title" --yesno "$prompt_text" 10 70
-        return $?
-    else
-        # Fallback for minimal environments
-        while true; do
-            read -p "$prompt_text [y/n]: " yn
-            case $yn in
-                [Yy]*) return 0 ;; # Success (like "Yes" in dialog)
-                [Nn]*) return 1 ;; # Failure (like "No" in dialog)
-                *) echo "Please answer yes or no." ;;
-            esac
-        done
-    fi
+    # local title="${2:-Confirmation}" # Title is no longer used
+    local yn
+    while true; do
+        read -r -p "$prompt_text [y/n]: " yn
+        case $yn in
+            [Yy]*) return 0 ;;
+            [Nn]*) return 1 ;;
+            *) echo "Please answer yes (y) or no (n)." >&2 ;;
+        esac
+    done
 }
 
 init_environment() {
@@ -101,21 +96,16 @@ source ./encryption_logic.sh
 source ./zfs_logic.sh
 source ./system_config.sh
 source ./bootloader_logic.sh
+source ./yubikey_setup.sh
 
 gather_user_options() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     show_header "CONFIGURATION"
 
-    # ANNOTATION: Add a check for dialog. If it's not present, we can't show complex menus.
-    # The script should exit gracefully, telling the user to install it.
-    if ! command -v dialog &>/dev/null; then
-        show_error "The 'dialog' utility is required for interactive setup but is not installed."
-        show_error "Please install it (e.g., 'apt-get install dialog') and re-run the installer."
-        exit 1
-    fi
-
     # Initialize default values for ZFS native encryption
     CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="no"
+    CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]="no"
+    CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]="6" # Default slot
     CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-256-gcm"
 
     # --- ZFS, Encryption, Clover, and Network TUIs ---
@@ -128,25 +118,50 @@ gather_user_options() {
     # ZFS Native Encryption Prompts
     if _prompt_user_yes_no "Enable native ZFS encryption for the root pool?" "ZFS Native Encryption"; then
         CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="yes"
-        local zfs_encryption_algorithm
-        zfs_encryption_algorithm=$(dialog --title "ZFS Encryption Algorithm" --radiolist "Select ZFS encryption algorithm (aes-256-gcm is recommended):" 15 70 5 \
-            "aes-256-gcm" "AES 256 GCM (Recommended)" "on" \
-            "aes-128-gcm" "AES 128 GCM" "off" \
-            "aes-256-ccm" "AES 256 CCM" "off" \
-            "aes-128-ccm" "AES 128 CCM" "off" \
-            "off"         "Disable (should not happen if previous step was yes)" "off" \
-            3>&1 1>&2 2>&3) || { show_error "Selection cancelled. Defaulting to aes-256-gcm."; zfs_encryption_algorithm="aes-256-gcm"; }
-
-        if [[ "$zfs_encryption_algorithm" == "off" ]]; then
-            log_debug "User selected 'off' for ZFS encryption algorithm after enabling it. Defaulting to aes-256-gcm."
-            CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-256-gcm"
-        else
-            CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="$zfs_encryption_algorithm"
-        fi
+        local alg_choice
+        echo "Select ZFS encryption algorithm (aes-256-gcm is recommended):"
+        echo "  1. aes-256-gcm (Recommended)"
+        echo "  2. aes-128-gcm"
+        echo "  3. aes-256-ccm"
+        echo "  4. aes-128-ccm"
+        read -r -p "Enter choice [1-4, default 1]: " alg_choice
+        case "$alg_choice" in
+            1|"") CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-256-gcm" ;; # Default on empty input
+            2) CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-128-gcm" ;;
+            3) CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-256-ccm" ;;
+            4) CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-128-ccm" ;;
+            *)  show_warning "Invalid selection. Defaulting to aes-256-gcm."
+                CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-256-gcm" ;;
+        esac
         log_debug "User opted to use ZFS native encryption with algorithm: ${CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]}."
     else
         CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="no"
         log_debug "User opted not to use ZFS native encryption."
+    fi
+
+    # Prompts for YubiKey for ZFS key if ZFS native encryption is enabled
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]}" == "yes" ]]; then
+        if _prompt_user_yes_no "Use a YubiKey to store and protect the ZFS native encryption key?
+(This will use a small dedicated LUKS partition on the primary disk, unlocked by YubiKey, to hold the ZFS pool key.)" "YubiKey for ZFS Key"; then
+            CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]="yes"
+            log_debug "User opted to use YubiKey for ZFS native encryption key."
+
+            local yk_slot_input
+            read -r -p "Enter the YubiKey slot for the ZFS key LUKS partition (1-16, default 6): " yk_slot_input
+            if [[ -z "$yk_slot_input" ]]; then
+                yk_slot_input="6" # Default if empty
+            fi
+            if [[ "$yk_slot_input" =~ ^[0-9]+$ ]] && [[ "$yk_slot_input" -ge 1 ]] && [[ "$yk_slot_input" -le 16 ]]; then
+                CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]="$yk_slot_input"
+            else
+                show_warning "Invalid YubiKey slot '$yk_slot_input'. Defaulting to 6."
+                CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]="6"
+            fi
+            log_debug "YubiKey slot for ZFS key LUKS partition set to: ${CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]}"
+        else
+            CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]="no"
+            log_debug "User opted not to use YubiKey for ZFS native encryption key."
+        fi
     fi
 
     # Example for Clover prompt
