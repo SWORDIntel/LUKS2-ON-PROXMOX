@@ -133,6 +133,31 @@ EOF
         echo "@@FSTAB_CONFIG@@" > /etc/fstab
         echo "@@CRYPMTAB_CONFIG@@" > /etc/crypttab
 
+        # --- YubiKey ZFS Key Configuration ---
+        if [ "@@USE_YUBIKEY_FOR_ZFS_KEY@@" == "yes" ] && [ -n "@@YUBIKEY_KEY_PART_UUID@@" ]; then
+            echo "Creating /etc/ykzfs.conf for initramfs..."
+            mkdir -p /etc/ykzfs
+            cat > /etc/ykzfs/ykzfs.conf << EOF_YKZFS_CONF
+# Configuration for YubiKey ZFS key unlocking in initramfs
+# This file is read by initramfs scripts. Do not edit manually unless you know what you are doing.
+
+# UUID of the LUKS partition that holds the ZFS keyfile and is unlocked by YubiKey.
+YUBIKEY_ZFS_KEY_LUKS_UUID="@@YUBIKEY_KEY_PART_UUID@@"
+
+# Path on the LUKS partition where the ZFS keyfile is stored.
+ZFS_KEYFILE_RELATIVE_PATH="@@ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS@@"
+
+# Target path in initramfs where the ZFS keyfile should be copied.
+ZFS_KEYFILE_INITRAMFS_TARGET="/run/zfs_key.bin"
+
+# Mapper name to use for the YubiKey LUKS partition when opened in initramfs.
+YUBIKEY_ZFS_KEY_MAPPER_NAME="yubikey_zfs_key_mapper"
+EOF_YKZFS_CONF
+            echo "/etc/ykzfs/ykzfs.conf created."
+        else
+            echo "Skipping /etc/ykzfs.conf creation (YubiKey for ZFS key not enabled or UUID missing)."
+        fi
+
         # --- Bootloader Installation ---
         update-initramfs -u -k all
         if [ "@@GRUB_MODE@@" == "UEFI" ]; then
@@ -197,6 +222,8 @@ CHROOT_SCRIPT_TPL
         -e "s|@@PRIMARY_DISK@@|${primary_disk_for_grub}|g" \
         -e "s|@@USE_YUBIKEY@@|${CONFIG_VARS[USE_YUBIKEY]:-no}|g" \
         -e "s|@@USE_YUBIKEY_FOR_ZFS_KEY@@|${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}|g" \
+        -e "s|@@YUBIKEY_KEY_PART_UUID@@|${CONFIG_VARS[YUBIKEY_KEY_PART_UUID]:-}|g" \
+        -e "s|@@ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS@@|${CONFIG_VARS[ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS]:-/keys/zfs.key}|g" \
         /mnt/tmp/configure.sh.tpl > /mnt/tmp/configure.sh
     chmod +x /mnt/tmp/configure.sh
     rm /mnt/tmp/configure.sh.tpl

@@ -123,6 +123,40 @@ run_installation_logic() {
     partition_and_format_disks
     health_check "disks" true
 
+    # Determine and store UUID for the YubiKey ZFS key partition if it was created
+    if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" == "yes" && -n "${CONFIG_VARS[YUBIKEY_KEY_PART]}" ]]; then
+        log_debug "Determining UUID for YubiKey ZFS key partition: ${CONFIG_VARS[YUBIKEY_KEY_PART]}"
+        local yk_part_uuid
+        # Ensure blkid is available; it should be due to ensure_essential_packages
+        if command -v blkid &>/dev/null; then
+            # Using a loop with retries for blkid, as device detection can sometimes have slight delays
+            for i in {1..3}; do
+                yk_part_uuid=$(blkid -s UUID -o value "${CONFIG_VARS[YUBIKEY_KEY_PART]}" 2>/dev/null)
+                if [[ -n "$yk_part_uuid" ]]; then
+                    break
+                fi
+                log_debug "blkid attempt $i for ${CONFIG_VARS[YUBIKEY_KEY_PART]} failed to get UUID, retrying after 1s..."
+                sleep 1
+            done
+
+            if [[ -n "$yk_part_uuid" ]]; then
+                CONFIG_VARS[YUBIKEY_KEY_PART_UUID]="$yk_part_uuid"
+                log_debug "Stored YUBIKEY_KEY_PART_UUID: ${CONFIG_VARS[YUBIKEY_KEY_PART_UUID]}"
+            else
+                show_error "Failed to determine UUID for YubiKey ZFS key partition ${CONFIG_VARS[YUBIKEY_KEY_PART]}. This is critical for initramfs setup. Aborting."
+                # Consider if cleanup is needed or if trap will handle it
+                exit 1
+            fi
+        else
+            show_error "blkid command not found. Cannot determine UUID for YubiKey ZFS key partition. Aborting."
+            exit 1
+        fi
+    else
+        # Ensure it's cleared if not used, so the ykzfs.conf doesn't get a stale or wrong UUID
+        CONFIG_VARS[YUBIKEY_KEY_PART_UUID]=""
+        log_debug "YubiKey for ZFS key not enabled or partition not set; YUBIKEY_KEY_PART_UUID cleared."
+    fi
+
     # Setup YubiKey LUKS partition for ZFS key if selected
     if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" && "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" == "yes" ]]; then
         if [[ -n "${CONFIG_VARS[YUBIKEY_KEY_PART]}" ]]; then # Check if the dedicated partition variable is set
@@ -150,6 +184,208 @@ run_installation_logic() {
     health_check "zfs" true
     
     install_base_system
+
+    if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" == "yes" ]]; then
+        log_info "Creating YubiKey ZFS initramfs hook script..."
+        local ykzfs_hook_script_path="/mnt/etc/initramfs-tools/hooks/ykzfs_hooks.sh"
+        mkdir -p "$(dirname "$ykzfs_hook_script_path")"
+
+        cat > "$ykzfs_hook_script_path" << 'EOF_YKZFS_HOOK'
+#!/bin/sh
+# Initramfs hook for YubiKey ZFS key unlocking
+
+PREREQ=""
+
+# Output some debug info to initramfs build log
+echo "ykzfs_hooks: Running YubiKey ZFS hook script"
+
+# Ensure /conf directory exists for our config file
+mkdir -p "${DESTDIR}/conf"
+
+# Copy the ykzfs configuration file into initramfs
+if [ -f "/etc/ykzfs/ykzfs.conf" ]; then
+    echo "ykzfs_hooks: Copying /etc/ykzfs/ykzfs.conf to ${DESTDIR}/conf/ykzfs.conf"
+    cp "/etc/ykzfs/ykzfs.conf" "${DESTDIR}/conf/ykzfs.conf"
+else
+    echo "ykzfs_hooks: WARNING - /etc/ykzfs/ykzfs.conf not found!"
+fi
+
+# Copy necessary binaries. copy_exec handles dependencies.
+# Ensure these are available in the chroot environment first.
+echo "ykzfs_hooks: Copying binaries: cryptsetup, yubikey-luks-open, ykpersonalize, tpm2_eventlog, mount, umount, sleep, grep, sed" # Added tpm2_eventlog as ykpersonalize may need it
+copy_exec /sbin/cryptsetup /sbin
+copy_exec /usr/bin/yubikey-luks-open /usr/bin
+copy_exec /usr/bin/ykpersonalize /usr/bin
+copy_exec /usr/bin/tpm2_eventlog /usr/bin # Often a dep of ykpersonalize/yubikey tools for FIDO2/U2F functionality
+copy_exec /bin/mount /bin
+copy_exec /bin/umount /bin
+copy_exec /bin/sleep /bin
+copy_exec /bin/grep /bin # For parsing config
+copy_exec /bin/sed /bin  # For parsing config
+
+# Add any other specific tools your ykzfs_unlock script might need, e.g., blkid for UUID matching if not using /dev/disk/by-uuid
+# copy_exec /sbin/blkid /sbin # If needed
+
+# Copy pcscd related files if yubikey-luks-open needs it at runtime in initramfs
+# This can be complex. Usually, pcscd is NOT run in initramfs.
+# yubikey-luks-open and ykpersonalize are often compiled to access YubiKey directly via libusb.
+# If full pcscd is needed, it's a much more involved initramfs setup.
+# For now, assume direct USB access is sufficient.
+
+# Ensure essential libraries for libykpers and libu2f (if ykpersonalize needs them and copy_exec doesn't get them)
+# Typically handled by copy_exec, but good to be aware.
+# manual_copy_if_needed /usr/lib/x86_64-linux-gnu/libykpers-1.so.1
+# manual_copy_if_needed /usr/lib/x86_64-linux-gnu/libyubikey.so.0
+# manual_copy_if_needed /usr/lib/x86_64-linux-gnu/libu2f-host.so.0 (or similar name)
+
+echo "ykzfs_hooks: YubiKey ZFS hook script finished."
+exit 0
+EOF_YKZFS_HOOK
+
+        if ! chmod +x "$ykzfs_hook_script_path"; then
+            show_warning "Failed to make $ykzfs_hook_script_path executable."
+        fi
+        show_success "YubiKey ZFS initramfs hook script created at $ykzfs_hook_script_path"
+    else
+        log_info "YubiKey for ZFS key not enabled, skipping creation of ykzfs_hooks.sh."
+    fi
+
+    if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" == "yes" ]]; then
+        log_info "Creating YubiKey ZFS initramfs unlock script..."
+        local ykzfs_unlock_script_path="/mnt/etc/initramfs-tools/scripts/local-top/ykzfs_unlock"
+        # The hooks directory is already created by the previous step for ykzfs_hooks.sh
+        mkdir -p "$(dirname "$ykzfs_unlock_script_path")"
+
+        cat > "$ykzfs_unlock_script_path" << 'EOF_YKZFS_UNLOCK'
+#!/bin/sh
+# Initramfs script for YubiKey ZFS key unlocking (runs in local-top)
+
+PREREQ="" # Adjust if it needs to run after specific ZFS scripts, though local-top runs early
+
+# Source function library if available (e.g., for log_functions)
+# [ -f /scripts/functions ] && . /scripts/functions
+
+# Simple logger for initramfs, prepends script name
+log_this() {
+    echo "ykzfs_unlock: $1" >&2 # Output to stderr, often captured in boot logs
+}
+
+log_this "Starting YubiKey ZFS key unlock process..."
+
+# Configuration file path within initramfs
+CONF_FILE="/conf/ykzfs.conf"
+
+if [ ! -f "$CONF_FILE" ]; then
+    log_this "ERROR: Configuration file $CONF_FILE not found! Cannot proceed."
+    exit 1
+fi
+
+# Source the configuration variables
+YUBIKEY_ZFS_KEY_LUKS_UUID=$(grep '^YUBIKEY_ZFS_KEY_LUKS_UUID=' "$CONF_FILE" | sed -e 's/.*="//' -e 's/"$//')
+ZFS_KEYFILE_RELATIVE_PATH=$(grep '^ZFS_KEYFILE_RELATIVE_PATH=' "$CONF_FILE" | sed -e 's/.*="//' -e 's/"$//')
+ZFS_KEYFILE_INITRAMFS_TARGET=$(grep '^ZFS_KEYFILE_INITRAMFS_TARGET=' "$CONF_FILE" | sed -e 's/.*="//' -e 's/"$//')
+YUBIKEY_ZFS_KEY_MAPPER_NAME=$(grep '^YUBIKEY_ZFS_KEY_MAPPER_NAME=' "$CONF_FILE" | sed -e 's/.*="//' -e 's/"$//')
+
+if [ -z "$YUBIKEY_ZFS_KEY_LUKS_UUID" ] || [ -z "$ZFS_KEYFILE_RELATIVE_PATH" ] ||    [ -z "$ZFS_KEYFILE_INITRAMFS_TARGET" ] || [ -z "$YUBIKEY_ZFS_KEY_MAPPER_NAME" ]; then
+    log_this "ERROR: One or more required variables missing from $CONF_FILE. Cannot proceed."
+    exit 1
+fi
+
+log_this "Config loaded: UUID=$YUBIKEY_ZFS_KEY_LUKS_UUID, RelativeKeyPath=$ZFS_KEYFILE_RELATIVE_PATH, TargetKeyPath=$ZFS_KEYFILE_INITRAMFS_TARGET, MapperName=$YUBIKEY_ZFS_KEY_MAPPER_NAME"
+
+# Wait for the LUKS device to appear
+luks_dev_path_by_uuid="/dev/disk/by-uuid/${YUBIKEY_ZFS_KEY_LUKS_UUID}"
+max_wait_seconds=30
+current_wait=0
+log_this "Waiting for YubiKey LUKS key device $luks_dev_path_by_uuid to appear (max ${max_wait_seconds}s)..."
+while [ ! -b "$luks_dev_path_by_uuid" ] && [ "$current_wait" -lt "$max_wait_seconds" ]; do
+    sleep 1
+    current_wait=$((current_wait + 1))
+    # Modulo for less spammy logging: log_this "Waited ${current_wait}s..."
+    if [ $((current_wait % 5)) -eq 0 ]; then
+      log_this "Still waiting for $luks_dev_path_by_uuid (${current_wait}s)..."
+    fi
+done
+
+if [ ! -b "$luks_dev_path_by_uuid" ]; then
+    log_this "ERROR: YubiKey LUKS key device $luks_dev_path_by_uuid did not appear after ${max_wait_seconds}s. Cannot proceed."
+    exit 1
+fi
+log_this "YubiKey LUKS key device $luks_dev_path_by_uuid found."
+
+# Attempt to unlock the LUKS partition using yubikey-luks-open
+# This will prompt for YubiKey and its passphrase.
+log_this "Attempting to unlock $luks_dev_path_by_uuid with YubiKey as $YUBIKEY_ZFS_KEY_MAPPER_NAME..."
+echo "Please insert your YubiKey and follow the prompts to unlock the ZFS key partition." >&1 # To console
+
+# yubikey-luks-open might need specific environment or TTY handling.
+# Test thoroughly. It typically handles user interaction.
+if ! yubikey-luks-open -d "$luks_dev_path_by_uuid" -n "$YUBIKEY_ZFS_KEY_MAPPER_NAME"; then
+    log_this "ERROR: Failed to unlock $luks_dev_path_by_uuid with yubikey-luks-open."
+    # Optionally, try cryptsetup open with passphrase as a fallback if yubikey-luks-open fails partially
+    # but this would require getting the passphrase again, complex for initramfs.
+    # For now, failure here means ZFS key is inaccessible.
+    exit 1
+fi
+log_this "Successfully unlocked $luks_dev_path_by_uuid as /dev/mapper/$YUBIKEY_ZFS_KEY_MAPPER_NAME."
+
+mapped_luks_device="/dev/mapper/$YUBIKEY_ZFS_KEY_MAPPER_NAME"
+temp_mount_point="/run/yk_luks_key_storage" # /run should be available in initramfs
+
+mkdir -p "$temp_mount_point"
+log_this "Mounting $mapped_luks_device to $temp_mount_point..."
+if ! mount -o ro "$mapped_luks_device" "$temp_mount_point"; then # Mount read-only
+    log_this "ERROR: Failed to mount $mapped_luks_device to $temp_mount_point."
+    cryptsetup close "$YUBIKEY_ZFS_KEY_MAPPER_NAME" # Attempt cleanup
+    exit 1
+fi
+log_this "$mapped_luks_device mounted to $temp_mount_point."
+
+zfs_keyfile_source="$temp_mount_point$ZFS_KEYFILE_RELATIVE_PATH" # Correctly append relative path
+log_this "ZFS keyfile source: $zfs_keyfile_source"
+
+if [ ! -f "$zfs_keyfile_source" ]; then
+    log_this "ERROR: ZFS keyfile $zfs_keyfile_source not found on the LUKS partition!"
+    umount "$temp_mount_point"
+    cryptsetup close "$YUBIKEY_ZFS_KEY_MAPPER_NAME"
+    exit 1
+fi
+
+log_this "Copying ZFS keyfile from $zfs_keyfile_source to $ZFS_KEYFILE_INITRAMFS_TARGET..."
+# Ensure target directory exists in /run (should be fine)
+mkdir -p "$(dirname "$ZFS_KEYFILE_INITRAMFS_TARGET")"
+cp "$zfs_keyfile_source" "$ZFS_KEYFILE_INITRAMFS_TARGET"
+if [ $? -ne 0 ]; then
+    log_this "ERROR: Failed to copy ZFS keyfile to $ZFS_KEYFILE_INITRAMFS_TARGET."
+    umount "$temp_mount_point"
+    cryptsetup close "$YUBIKEY_ZFS_KEY_MAPPER_NAME"
+    exit 1
+fi
+chmod 0400 "$ZFS_KEYFILE_INITRAMFS_TARGET" # Restrict permissions
+log_this "ZFS keyfile copied to $ZFS_KEYFILE_INITRAMFS_TARGET."
+
+log_this "Unmounting $temp_mount_point..."
+umount "$temp_mount_point"
+rmdir "$temp_mount_point"
+
+# Decide whether to close the LUKS mapper.
+# If ZFS loads the key and imports the pool successfully, keeping it open might not be necessary.
+# However, for cleanliness and security, it's better to close it.
+log_this "Closing LUKS mapper $YUBIKEY_ZFS_KEY_MAPPER_NAME..."
+cryptsetup close "$YUBIKEY_ZFS_KEY_MAPPER_NAME"
+
+log_this "YubiKey ZFS key unlock process completed successfully."
+exit 0
+EOF_YKZFS_UNLOCK
+
+        # Make the unlock script executable
+        if ! chmod +x "$ykzfs_unlock_script_path"; then
+            show_warning "Failed to make $ykzfs_unlock_script_path executable."
+        fi
+        show_success "YubiKey ZFS initramfs unlock script created at $ykzfs_unlock_script_path"
+    else
+        log_info "YubiKey for ZFS key not enabled, skipping creation of ykzfs_unlock script."
+    fi
     
     configure_new_system
     health_check "system" true
