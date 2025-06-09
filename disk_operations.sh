@@ -53,13 +53,13 @@ partition_and_format_disks() {
         # Show detailed health report
         local report_file="/tmp/disk_health_report.txt"
         check_disk_health > "$report_file"
-        show_header "Disk Health Report"
+        show_header "Disk Health Report" 
         if [[ -f "$report_file" ]]; then
             cat "$report_file"
         else
             echo "Report file ($report_file) not found."
         fi
-        echo
+        echo 
         read -r -p "Press Enter to continue..."
         rm -f "$report_file"
     else
@@ -115,7 +115,7 @@ partition_and_format_disks() {
         dialog_message+="This operation is IRREVERSIBLE! Are you absolutely sure?"
     fi
 
-    echo -e "\n$dialog_title"
+    echo -e "\n$dialog_title" 
     echo -e "$dialog_message"
     if ! _prompt_user_yes_no "Proceed with these IRREVERSIBLE operations?"; then
         show_error "Installation cancelled by user." && exit 1
@@ -178,7 +178,7 @@ partition_and_format_disks() {
         local exit_code_sgdisk_n3_luks=$?
         log_debug "Exit code for sgdisk LUKS-ZFS part (#3) on \"$primary_target\": $exit_code_sgdisk_n3_luks"
         # Ensure YUBIKEY_KEY_PART is cleared if not used
-        CONFIG_VARS[YUBIKEY_KEY_PART]=""
+        CONFIG_VARS[YUBIKEY_KEY_PART]="" 
     fi
 
     # Additional disk partitioning (unchanged, it's good)
@@ -213,7 +213,7 @@ partition_and_format_disks() {
     CONFIG_VARS[BOOT_PART]="${primary_target}${p_prefix}2"
     
     if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]}" == "yes" ]]; then
-        local p_prefix_yk=""
+        local p_prefix_yk="" 
         [[ "$primary_target" == /dev/nvme* ]] && p_prefix_yk="p"
         CONFIG_VARS[YUBIKEY_KEY_PART]="${primary_target}${p_prefix_yk}3"
         log_debug "YubiKey LUKS Key partition set to: ${CONFIG_VARS[YUBIKEY_KEY_PART]}"
@@ -222,7 +222,7 @@ partition_and_format_disks() {
         CONFIG_VARS[YUBIKEY_KEY_PART]=""
         log_debug "YubiKey LUKS Key partition is not used and cleared."
     fi
-
+    
     log_debug "Executing: mkfs.vfat -F32 \"${CONFIG_VARS[EFI_PART]}\""
     mkfs.vfat -F32 "${CONFIG_VARS[EFI_PART]}" &>> "$LOG_FILE"
     local exit_code_mkfs_vfat=$?
