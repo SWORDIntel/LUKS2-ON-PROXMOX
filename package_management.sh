@@ -86,9 +86,11 @@ _ensure_proxmox_apt_configuration() {
     if [ -d "/etc/apt/sources.list.d" ]; then
         # Exclude the pve-enterprise.list we just handled, and our target no-sub lists
         # Using find to get full paths and avoid issues with spaces or special chars if any
+        local find_output
+        find_output=$(find /etc/apt/sources.list.d/ -maxdepth 1 -name "*.list" ! -name "pve-enterprise.list" ! -name "pve-no-subscription.list" ! -name "ceph.list" -print0)
         while IFS= read -r -d $'\0' file; do
             other_apt_files_to_check+=("$file")
-        done < <(find /etc/apt/sources.list.d/ -maxdepth 1 -name "*.list" ! -name "pve-enterprise.list" ! -name "pve-no-subscription.list" ! -name "ceph.list" -print0)
+        done <<< "$find_output"
     fi
 
     for apt_file in "${other_apt_files_to_check[@]}"; do

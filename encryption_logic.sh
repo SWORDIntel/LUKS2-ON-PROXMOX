@@ -307,6 +307,8 @@ backup_luks_header() {
     local lsblk_cmd="lsblk -ndo NAME,MODEL,SIZE,TYPE"
     log_debug "Executing: $lsblk_cmd"
     # Get list of block devices that are disks, excluding loop and srX devices
+    local lsblk_output
+    lsblk_output=$(lsblk -ndo NAME,MODEL,SIZE,TYPE)
     while IFS= read -r line; do
         log_debug "Processing lsblk line: '$line'"
         local name type model_size
@@ -323,7 +325,7 @@ backup_luks_header() {
         else
             log_debug "Device '/dev/$name' skipped. Type: '$type'."
         fi
-    done < <(lsblk -ndo NAME,MODEL,SIZE,TYPE)
+    done <<< "$lsblk_output"
     log_debug "Finished processing lsblk output."
 
     if [[ ${#device_options[@]} -eq 0 ]]; then

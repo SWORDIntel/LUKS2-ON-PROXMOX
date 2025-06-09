@@ -49,7 +49,9 @@ select_interface() {
     # Exclude loopback, virtual (virbr, docker, veth, etc.), and wireless (wlan, wlp)
     # Common Ethernet prefixes: eth, eno, enp, ens, enx
     local available_interfaces
-    mapfile -t available_interfaces < <(ip -o link show | awk -F': ' '$0 !~ /LOOPBACK|UNKNOWN|DOWN/ && $2 !~ /^(lo|virbr|docker|veth|wlan|wlp)/ && $2 ~ /^(eth|en[opxs])/ {print $2}')
+    local raw_interfaces
+    raw_interfaces=$(ip -o link show | awk -F': ' '$0 !~ /LOOPBACK|UNKNOWN|DOWN/ && $2 !~ /^(lo|virbr|docker|veth|wlan|wlp)/ && $2 ~ /^(eth|en[opxs])/ {print $2}')
+    mapfile -t available_interfaces <<< "$raw_interfaces"
 
     if [[ ${#available_interfaces[@]} -eq 0 ]]; then
         _log_error "No suitable active Ethernet interfaces found."

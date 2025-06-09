@@ -165,7 +165,7 @@ gather_user_options() {
                     if ! grep -q -w "/dev/$name" <<< "$all_zfs_disks_str"; then
                         header_disk_names+=("/dev/$name - $size, $model")
                     fi
-                done < <(echo "$disk_info")
+                done <<< "$disk_info"
                 log_debug "RAM_DISK_DEBUG: Populated header_disk_names: ${header_disk_names[*]}"
                 log_debug "Available disks for detached headers: ${header_disk_names[*]}"
 
