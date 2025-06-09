@@ -30,15 +30,24 @@ health_check() {
             ;;
         "system")
             check_system_integrity || all_checks_passed=false
+            if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" == "yes" ]]; then
+                check_yubikey_zfs_setup || all_checks_passed=false
+            fi
             ;;
         "network")
             check_network_connectivity || all_checks_passed=false
             ;;
         "all")
             check_disk_health || all_checks_passed=false
-            check_luks_integrity || all_checks_passed=false
+            # Conditionally check LUKS integrity if ZFS native encryption is not primary
+            if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" != "yes" ]]; then
+                check_luks_integrity || all_checks_passed=false
+            fi
             check_zfs_pool_health || all_checks_passed=false
             check_system_integrity || all_checks_passed=false
+            if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" == "yes" ]]; then
+                check_yubikey_zfs_setup || all_checks_passed=false
+            fi
             check_network_connectivity || all_checks_passed=false
             ;;
         *)
@@ -53,6 +62,86 @@ health_check() {
     fi
     
     return $all_checks_passed
+}
+
+check_yubikey_zfs_setup() {
+    log_info "Checking YubiKey ZFS Key Setup..."
+    local all_passed=true
+    local new_sys_mount="${CONFIG_VARS[NEW_SYSTEM_MOUNT]:-/mnt}" # Default to /mnt if not set
+
+    if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" != "yes" ]]; then
+        log_info "YubiKey for ZFS Key not enabled, skipping these checks."
+        return 0 # True, as the setup is not applicable
+    fi
+
+    # Check 1: Verify YubiKey LUKS Key Partition is LUKS formatted
+    if [[ -n "${CONFIG_VARS[YUBIKEY_KEY_PART_UUID]}" ]]; then
+        local yk_luks_dev_by_uuid="/dev/disk/by-uuid/${CONFIG_VARS[YUBIKEY_KEY_PART_UUID]}"
+        if [[ ! -b "$yk_luks_dev_by_uuid" ]]; then
+            log_error "YubiKey LUKS key partition device $yk_luks_dev_by_uuid not found."
+            all_passed=false
+        elif ! cryptsetup isLuks "$yk_luks_dev_by_uuid" &>> "$LOG_FILE"; then
+            log_error "YubiKey LUKS key partition $yk_luks_dev_by_uuid is not a valid LUKS device."
+            all_passed=false
+        else
+            log_success "YubiKey LUKS key partition $yk_luks_dev_by_uuid is LUKS formatted."
+        fi
+    else
+        log_error "YUBIKEY_KEY_PART_UUID is not set, cannot check LUKS format for YubiKey key partition."
+        all_passed=false
+    fi
+
+    # Check 2: Verify /etc/ykzfs/ykzfs.conf on target system
+    local ykzfs_conf_path="${new_sys_mount}/etc/ykzfs/ykzfs.conf"
+    if [[ ! -f "$ykzfs_conf_path" ]]; then
+        log_error "YubiKey ZFS config file $ykzfs_conf_path not found on target system."
+        all_passed=false
+    else
+        log_success "YubiKey ZFS config file $ykzfs_conf_path found."
+        # Verify content
+        local conf_uuid=$(grep '^YUBIKEY_ZFS_KEY_LUKS_UUID=' "$ykzfs_conf_path" | sed -e 's/.*="//' -e 's/"$//')
+        local conf_key_path=$(grep '^ZFS_KEYFILE_RELATIVE_PATH=' "$ykzfs_conf_path" | sed -e 's/.*="//' -e 's/"$//')
+
+        if [[ "$conf_uuid" != "${CONFIG_VARS[YUBIKEY_KEY_PART_UUID]}" ]]; then
+            log_error "Mismatch in $ykzfs_conf_path: YUBIKEY_ZFS_KEY_LUKS_UUID is '$conf_uuid', expected '${CONFIG_VARS[YUBIKEY_KEY_PART_UUID]}'."
+            all_passed=false
+        else
+            log_success "$ykzfs_conf_path: YUBIKEY_ZFS_KEY_LUKS_UUID matches."
+        fi
+
+        if [[ "$conf_key_path" != "${CONFIG_VARS[ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS]}" ]]; then
+            log_error "Mismatch in $ykzfs_conf_path: ZFS_KEYFILE_RELATIVE_PATH is '$conf_key_path', expected '${CONFIG_VARS[ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS]}'."
+            all_passed=false
+        else
+            log_success "$ykzfs_conf_path: ZFS_KEYFILE_RELATIVE_PATH matches."
+        fi
+    fi
+
+    # Check 3: Verify initramfs hook and script files exist and are executable
+    local ykzfs_hook_file="${new_sys_mount}/etc/initramfs-tools/hooks/ykzfs_hooks.sh"
+    local ykzfs_unlock_script="${new_sys_mount}/etc/initramfs-tools/scripts/local-top/ykzfs_unlock"
+
+    if [[ ! -f "$ykzfs_hook_file" ]]; then
+        log_error "Initramfs hook script $ykzfs_hook_file not found."
+        all_passed=false
+    elif [[ ! -x "$ykzfs_hook_file" ]]; then
+        log_error "Initramfs hook script $ykzfs_hook_file is not executable."
+        all_passed=false
+    else
+        log_success "Initramfs hook script $ykzfs_hook_file found and executable."
+    fi
+
+    if [[ ! -f "$ykzfs_unlock_script" ]]; then
+        log_error "Initramfs unlock script $ykzfs_unlock_script not found."
+        all_passed=false
+    elif [[ ! -x "$ykzfs_unlock_script" ]]; then
+        log_error "Initramfs unlock script $ykzfs_unlock_script is not executable."
+        all_passed=false
+    else
+        log_success "Initramfs unlock script $ykzfs_unlock_script found and executable."
+    fi
+
+    return $all_passed
 }
 
 # Disk health check with SMART integration

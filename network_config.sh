@@ -52,27 +52,62 @@ _configure_network_interactive() {
     show_warning "Automatic network setup failed. Manual configuration is required."
 
     local iface_options=()
+    # Populate iface_options as before
     while read -r iface; do
         local status; status=$(ip link show "$iface" 2>/dev/null | grep -q "state UP" && echo "UP" || echo "DOWN")
-        iface_options+=("$iface" "$iface ($status)" "off")
+        iface_options+=("$iface" "$iface ($status)") # Simplified for text menu
     done < <(ls /sys/class/net | grep -vE '^(lo|docker|veth|virbr|tun|tap)')
 
-    if [[ ${#iface_options[@]} -eq 0 ]]; then
-        show_error "No network interfaces found to configure." && return 1
+    if [[ ${#iface_options[@]} -eq 0 ]]; then # Check if any options were generated
+        show_error "No suitable network interfaces found to configure." && return 1
     fi
 
-    local selected_iface
-    selected_iface=$(dialog --title "Network Interface" --radiolist "Select interface to configure:" 15 70 $((${#iface_options[@]}/3)) "${iface_options[@]}" 3>&1 1>&2 2>&3) || return 1
+    echo # Newline
+    echo "Select network interface to configure:"
+    local i_num=0
+    local interfaces_only_paths=() # Store only device paths
+    for i in $(seq 0 2 $((${#iface_options[@]} - 1))); do
+        i_num=$((i_num + 1))
+        interfaces_only_paths+=("${iface_options[$i]}")
+        echo "  $i_num. ${iface_options[$i+1]}" # Display description part
+    done
+
+    if [[ $i_num -eq 0 ]]; then # Double check no interfaces listed
+            show_error "No network interfaces listed for selection." && return 1
+    fi
+
+    local selected_iface iface_choice
+    while true; do
+        read -r -p "Enter choice [1-$i_num] or 'c' to cancel: " iface_choice
+        if [[ "$iface_choice" == [cC] ]]; then
+            log_debug "Interface selection cancelled by user."
+            return 1
+        fi
+        if [[ "$iface_choice" =~ ^[0-9]+$ ]] && [[ "$iface_choice" -ge 1 ]] && [[ "$iface_choice" -le $i_num ]]; then
+            selected_iface="${interfaces_only_paths[$((iface_choice - 1))]}"
+            break
+        else
+            show_warning "Invalid selection. Please enter a number between 1 and $i_num, or 'c' to cancel."
+        fi
+    done
     log_debug "User selected interface: $selected_iface"
 
     local ip_addr
-    ip_addr=$(dialog --title "IP Address" --inputbox "Enter IP address with CIDR (e.g., 192.168.1.100/24):" 10 60 "192.168.1.100/24" 3>&1 1>&2 2>&3) || return 1
+    read -r -p "Enter IP address with CIDR for $selected_iface (e.g., 192.168.1.100/24), or 'c' to cancel: " ip_addr
+    if [[ "$ip_addr" == [cC] ]] || [[ -z "$ip_addr" ]]; then
+        log_debug "IP address input cancelled or empty."
+        return 1
+    fi
     if ! [[ "$ip_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
         show_error "Invalid IP/CIDR format." && return 1
     fi
 
     local gateway
-    gateway=$(dialog --title "Gateway" --inputbox "Enter gateway IP:" 10 60 "192.168.1.1" 3>&1 1>&2 2>&3) || return 1
+    read -r -p "Enter gateway IP for $selected_iface (e.g., 192.168.1.1), or 'c' to cancel: " gateway
+    if [[ "$gateway" == [cC] ]] || [[ -z "$gateway" ]]; then
+        log_debug "Gateway input cancelled or empty."
+        return 1
+    fi
     if ! [[ "$gateway" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         show_error "Invalid Gateway IP format." && return 1
     fi
@@ -155,7 +190,13 @@ download_offline_packages() {
         return 1
     fi
 
-    dialog --title "Air-Gapped Installation" --msgbox "For use on an air-gapped machine, ensure you copy the ENTIRE installer directory (including the 'debs' folder) to your installation media." 10 70
+    echo # Newline for clarity
+    show_header "Air-Gapped Installation Note"
+    echo "For use on an air-gapped machine, ensure you copy the ENTIRE"
+    echo "installer directory (including the 'debs' folder) to your"
+    echo "installation media."
+    echo
+    read -r -p "Press Enter to continue..."
     log_debug "Exiting function: ${FUNCNAME[0]}"
     return 0
 }

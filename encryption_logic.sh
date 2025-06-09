@@ -23,18 +23,23 @@ setup_luks_encryption() {
     log_debug "LUKS partitions to encrypt: ${luks_partitions_arr[*]}"
     local luks_mappers=()
 
-    log_debug "Prompting for LUKS passphrase."
-    local pass
-    pass=$(dialog --title "LUKS Passphrase" --passwordbox "Enter new LUKS passphrase for all disks:" 10 60 3>&1 1>&2 2>&3) || { log_debug "LUKS passphrase entry cancelled."; exit 1; }
-
-    local pass_confirm
-    pass_confirm=$(dialog --title "LUKS Passphrase" --passwordbox "Confirm passphrase:" 10 60 3>&1 1>&2 2>&3) || { log_debug "LUKS passphrase confirmation cancelled."; exit 1; }
-
-    if [[ "$pass" != "$pass_confirm" ]] || [[ -z "$pass" ]]; then
-        log_debug "LUKS passphrases do not match or are empty."
-        show_error "Passphrases do not match or are empty."
-        exit 1
-    fi
+    local pass pass_confirm
+    while true; do
+        echo # Newline for cleaner prompt separation
+        read -r -s -p "Enter new LUKS passphrase for all disks: " pass
+        echo # Move to next line after hidden input
+        if [[ -z "$pass" ]]; then
+            show_error "Passphrase cannot be empty. Please try again or Ctrl+C to abort."
+            continue
+        fi
+        read -r -s -p "Confirm passphrase: " pass_confirm
+        echo # Move to next line
+        if [[ "$pass" == "$pass_confirm" ]]; then
+            break
+        else
+            show_error "Passphrases do not match. Please try again."
+        fi
+    done
     log_debug "LUKS passphrase confirmed (not logging passphrase itself)."
 
     local header_mount=""
@@ -102,7 +107,7 @@ setup_luks_encryption() {
             if ! command -v yubikey-luks-enroll &>/dev/null; then
                 log_debug "ERROR: yubikey-luks-enroll command not found - YubiKey enrollment cannot proceed"
                 show_error "YubiKey enrollment not possible - yubikey-luks-enroll command is missing."
-                if dialog --title "YubiKey Support Missing" --yesno "The required YubiKey enrollment tool is not available on this system.\n\nDo you want to continue with passphrase-only encryption for $part?" 10 70; then
+                if _prompt_user_yes_no "The required YubiKey enrollment tool (yubikey-luks-enroll) is not available. Continue with passphrase-only encryption for $part?"; then
                     log_debug "User chose to continue without YubiKey for $part due to missing tool."
                     show_warning "Continuing without YubiKey support."
                 else
@@ -111,12 +116,14 @@ setup_luks_encryption() {
                     exit 1
                 fi
             else
-                dialog --title "YubiKey Enrollment" --infobox "Preparing to enroll YubiKey for $part.\n\nPlease follow the upcoming prompts from 'yubikey-luks-enroll'.\n\nYou will likely need to enter your main LUKS passphrase again and touch your YubiKey when it flashes." 10 70
-                sleep 4 # Give user time to read
+                echo # Newline for clarity
+                echo "Preparing to enroll YubiKey for $part (Slot 7 for OS LUKS)."
+                echo "Please follow the upcoming prompts from 'yubikey-luks-enroll'."
+                echo "You will likely need to enter your main LUKS passphrase again and touch your YubiKey when it flashes."
+                echo "Waiting for 4 seconds before proceeding..."
+                sleep 4
 
                 show_progress "Please follow the prompts from yubikey-luks-enroll for $part."
-                # yubikey-luks-enroll output will go to TTY, not easily captured with command substitution if it uses /dev/tty
-                # We rely on its exit code and user observation.
                 if yubikey-luks-enroll -d "$part" -s 7; then
                     log_debug "YubiKey successfully enrolled for $part."
                     show_success "YubiKey enrolled for $part."
@@ -124,7 +131,7 @@ setup_luks_encryption() {
                     local enroll_status=$?
                     log_debug "YubiKey enrollment failed for $part (exit code: $enroll_status). Offering to continue without YubiKey for this disk."
                     show_error "YubiKey enrollment failed for $part."
-                    if dialog --title "YubiKey Enrollment Failed" --yesno "YubiKey enrollment for $part failed. \nDo you want to continue setting up this disk with passphrase-only encryption, or cancel the entire installation?" 12 70; then
+                    if _prompt_user_yes_no "YubiKey enrollment for $part failed. Continue with passphrase-only encryption for this disk (not recommended for YubiKey setup), or cancel the entire installation? (Choosing 'no' will cancel)"; then
                         log_debug "User chose to continue without YubiKey for $part after failed enrollment."
                         show_warning "Continuing with passphrase-only encryption for $part."
                     else
@@ -134,7 +141,9 @@ setup_luks_encryption() {
                     fi
                 fi
             fi
-            dialog --title "Enrollment Status" --msgbox "YubiKey enrollment process for $part finished. Press OK to continue to the next disk (if any) or step." 8 70
+            echo # Newline
+            echo "YubiKey enrollment process for $part finished."
+            read -r -p "Press Enter to continue..."
         fi
     done
 
@@ -164,8 +173,7 @@ backup_luks_header() {
     show_step "BACKUP" "Backing Up LUKS Headers"
 
     log_debug "Prompting user whether to backup LUKS headers."
-    if ! dialog --title "LUKS Header Backup" \
-        --yesno "Would you like to backup LUKS headers to a removable device?" 8 60; then
+    if ! _prompt_user_yes_no "Would you like to backup LUKS headers to a removable device?"; then
         log_debug "User chose not to backup LUKS headers."
         show_warning "Skipping LUKS header backup"
         return
@@ -202,10 +210,43 @@ backup_luks_header() {
     fi
     log_debug "Available removable devices for backup: ${removable_devs[*]}"
 
-    local backup_dev
-    backup_dev=$(dialog --title "Backup Device" \
-        --radiolist "Select removable device for LUKS header backup:" 15 60 \
-        ${#removable_devs[@]} "${removable_devs[@]}" 3>&1 1>&2 2>&3) || { log_debug "Backup device selection cancelled."; return; }
+    local backup_dev_choice backup_dev_index backup_dev
+    if [[ ${#removable_devs[@]} -eq 0 ]]; then
+        log_debug "No removable devices found (this check is also done earlier, but as safeguard)."
+        show_warning "No removable devices found for backup."
+        return # Or return 1 if this path should not be reached
+    fi
+
+    echo # Newline
+    echo "Available removable devices for LUKS header backup:"
+    local num_options=0
+    local device_paths_only=() # Array to store only device paths for easy lookup
+    for i in $(seq 0 2 $((${#removable_devs[@]} - 1))); do
+        num_options=$((num_options + 1))
+        # removable_devs is ("path1" "desc1" "path2" "desc2")
+        echo "  $num_options. ${removable_devs[$i]} (${removable_devs[$i+1]})"
+        device_paths_only+=("${removable_devs[$i]}")
+    done
+
+    if [[ $num_options -eq 0 ]]; then # Should be caught by earlier check too
+            show_warning "No suitable removable devices listed."
+            return
+    fi
+
+    while true; do
+        read -r -p "Select device by number (1-$num_options) or 'c' to cancel: " backup_dev_choice
+        if [[ "$backup_dev_choice" == [cC] ]]; then
+            log_debug "Backup device selection cancelled by user."
+            return # Or specific return code for cancellation
+        fi
+        if [[ "$backup_dev_choice" =~ ^[0-9]+$ ]] && [[ "$backup_dev_choice" -ge 1 ]] && [[ "$backup_dev_choice" -le $num_options ]]; then
+            backup_dev_index=$((backup_dev_choice - 1))
+            backup_dev="${device_paths_only[$backup_dev_index]}"
+            break
+        else
+            show_warning "Invalid selection. Please enter a number between 1 and $num_options, or 'c' to cancel."
+        fi
+    done
     log_debug "User selected backup device: $backup_dev"
 
     show_progress "Preparing backup device $backup_dev..."

@@ -12,7 +12,7 @@ install_base_system() {
     show_success "Boot and EFI partitions mounted."
 
     show_progress "Installing Debian base system (this will take several minutes)..."
-    local debian_release="bookworm"
+    local debian_release="trixie"
     local debian_mirror="http://deb.debian.org/debian"
 
     # debootstrap logic is good, keeping it.
@@ -89,13 +89,23 @@ EOF
 
         # --- APT and Proxmox Repos ---
         cat > /etc/apt/sources.list << EOF
-deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
-deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian/ trixie main contrib non-free non-free-firmware
+deb http://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian/ trixie-updates main contrib non-free non-free-firmware
 EOF
         wget -q -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg http://download.proxmox.com/debian/proxmox-release-bookworm.gpg
         echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-install-repo.list
         
+        cat > /etc/apt/preferences.d/proxmox-pinning << EOF_PINNING
+Package: proxmox-ve pve-firmware pve-kernel-* qemu-server libpve-access-control libpve-common-perl libpve-guest-common-perl libpve-http-server-perl libpve-storage-perl libqb100 libproxmox-backup-qemu0 libpve-cluster-api-perl libpve-cluster-perl corosync criu libcorosync-common4 libcfg7 libcmap4 libcvsservice23 libnozzle1 libquorum5 libvotequorum8 pve-cluster pve-container pve-docs pve-edk2-firmware pve-firewall pve-ha-manager pve-i18n pve-qemu-kvm pve-xtermjs spiceterm libspice-server1 vncterm qmextract
+Pin: release n=bookworm,o=Proxmox
+Pin-Priority: 1001
+
+Package: *
+Pin: release n=bookworm,o=Proxmox
+Pin-Priority: 500
+EOF_PINNING
+
         # --- Package Installation ---
         apt-get update
         export DEBIAN_FRONTEND=noninteractive
@@ -107,8 +117,9 @@ EOF
         else
             PACKAGES+=" grub-pc"
         fi
-        if [ "@@USE_YUBIKEY@@" == "yes" ]; then
-            PACKAGES+=" yubikey-luks libpam-yubico pcscd"
+        # If either general LUKS YubiKey or YubiKey for ZFS key is used, install tools
+        if [ "@@USE_YUBIKEY@@" == "yes" ] || [ "@@USE_YUBIKEY_FOR_ZFS_KEY@@" == "yes" ]; then
+            PACKAGES+=" yubikey-luks libpam-yubico pcscd yubikey-personalization"
             systemctl enable pcscd
         fi
         apt-get install -y --no-install-recommends $PACKAGES
@@ -121,6 +132,31 @@ EOF
         # --- fstab and crypttab ---
         echo "@@FSTAB_CONFIG@@" > /etc/fstab
         echo "@@CRYPMTAB_CONFIG@@" > /etc/crypttab
+
+        # --- YubiKey ZFS Key Configuration ---
+        if [ "@@USE_YUBIKEY_FOR_ZFS_KEY@@" == "yes" ] && [ -n "@@YUBIKEY_KEY_PART_UUID@@" ]; then
+            echo "Creating /etc/ykzfs.conf for initramfs..."
+            mkdir -p /etc/ykzfs
+            cat > /etc/ykzfs/ykzfs.conf << EOF_YKZFS_CONF
+# Configuration for YubiKey ZFS key unlocking in initramfs
+# This file is read by initramfs scripts. Do not edit manually unless you know what you are doing.
+
+# UUID of the LUKS partition that holds the ZFS keyfile and is unlocked by YubiKey.
+YUBIKEY_ZFS_KEY_LUKS_UUID="@@YUBIKEY_KEY_PART_UUID@@"
+
+# Path on the LUKS partition where the ZFS keyfile is stored.
+ZFS_KEYFILE_RELATIVE_PATH="@@ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS@@"
+
+# Target path in initramfs where the ZFS keyfile should be copied.
+ZFS_KEYFILE_INITRAMFS_TARGET="/run/zfs_key.bin"
+
+# Mapper name to use for the YubiKey LUKS partition when opened in initramfs.
+YUBIKEY_ZFS_KEY_MAPPER_NAME="yubikey_zfs_key_mapper"
+EOF_YKZFS_CONF
+            echo "/etc/ykzfs/ykzfs.conf created."
+        else
+            echo "Skipping /etc/ykzfs.conf creation (YubiKey for ZFS key not enabled or UUID missing)."
+        fi
 
         # --- Bootloader Installation ---
         update-initramfs -u -k all
@@ -185,6 +221,9 @@ CHROOT_SCRIPT_TPL
         -e "s|@@GRUB_MODE@@|${CONFIG_VARS[EFFECTIVE_GRUB_MODE]}|g" \
         -e "s|@@PRIMARY_DISK@@|${primary_disk_for_grub}|g" \
         -e "s|@@USE_YUBIKEY@@|${CONFIG_VARS[USE_YUBIKEY]:-no}|g" \
+        -e "s|@@USE_YUBIKEY_FOR_ZFS_KEY@@|${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}|g" \
+        -e "s|@@YUBIKEY_KEY_PART_UUID@@|${CONFIG_VARS[YUBIKEY_KEY_PART_UUID]:-}|g" \
+        -e "s|@@ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS@@|${CONFIG_VARS[ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS]:-/keys/zfs.key}|g" \
         /mnt/tmp/configure.sh.tpl > /mnt/tmp/configure.sh
     chmod +x /mnt/tmp/configure.sh
     rm /mnt/tmp/configure.sh.tpl
