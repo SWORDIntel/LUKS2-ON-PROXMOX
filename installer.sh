@@ -100,7 +100,7 @@ source ./health_checks.sh
 # source ./validation_module.sh
 
 # --- Global Variables ---
-RAMDISK_MNT="/mnt/ramdisk"
+export RAMDISK_MNT="/mnt/ramdisk"
 declare -A CONFIG_VARS # Association array to hold all config
 
 # Safely detect the installer device with fallbacks and validation
@@ -139,10 +139,8 @@ fi
 
 export INSTALLER_DEVICE
 echo "Detected installer device: $INSTALLER_DEVICE" >> "$LOG_FILE"
-readonly MIN_RAM_MB=4096
-readonly MIN_DISK_GB=8
 
-# The sequence of core installation steps.
+# --- Argument Parsing & Validation ---
 run_installation_logic() {
     log_debug "Entering function: run_installation_logic"
     # Load config or gather user options.

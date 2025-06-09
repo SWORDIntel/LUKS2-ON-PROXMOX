@@ -36,7 +36,23 @@ _try_dhcp_all_interfaces() {
 
     # Get a list of all physical-like interfaces.
     local interfaces
-    interfaces=$(ls /sys/class/net | grep -vE '^(lo|docker|veth|virbr|tun|tap)')
+    local interfaces_list=()
+    local iface_name
+    for iface_path in /sys/class/net/*; do
+        iface_name=$(basename "$iface_path")
+        case "$iface_name" in
+            lo|docker*|veth*|virbr*|tun*|tap*)
+                # Skip these
+                ;;
+            *)
+                # Ensure it's a real interface directory
+                if [[ -d "/sys/class/net/$iface_name" ]]; then
+                    interfaces_list+=("$iface_name")
+                fi
+                ;;
+        esac
+    done
+    local interfaces="${interfaces_list[*]}" # For existing loop structure
     if [[ -z "$interfaces" ]]; then
         log_warning "No suitable network interfaces found to attempt DHCP on."
         return 1
@@ -66,27 +82,23 @@ _configure_network_interactive() {
     show_warning "Automatic network setup failed. Manual configuration is required."
 
     local iface_options=()
-    # Populate iface_options as before
-    while read -r iface; do
-        local status; status=$(ip link show "$iface" 2>/dev/null | grep -q "state UP" && echo "UP" || echo "DOWN")
-        iface_options+=("$iface" "$iface ($status)") # Simplified for text menu
-    # Using temporary file instead of process substitution to avoid /dev/fd issues
-    local temp_ifaces
-    temp_ifaces=$(mktemp /tmp/installer_ifaces.XXXXXX) # Use a more specific tmp file pattern
-    if [[ -z "$temp_ifaces" || ! -f "$temp_ifaces" ]]; then
-        show_error "Failed to create temporary file for interface listing."
-        # rm -f "$temp_ifaces" # Clean up if mktemp created a name but not file
-        return 1 # or handle error appropriately
-    fi
-
-    if ! ls /sys/class/net | grep -vE '^(lo|docker|veth|virbr|tun|tap)' > "$temp_ifaces"; then
-        show_error "Failed to list network interfaces into temporary file."
-        rm -f "$temp_ifaces"
-        return 1
-    fi
-
-    done < "$temp_ifaces"
-    rm -f "$temp_ifaces"
+    # Directly populate iface_options without a temporary file
+    local iface_name
+    for iface_path in /sys/class/net/*; do
+        iface_name=$(basename "$iface_path")
+        case "$iface_name" in
+            lo|docker*|veth*|virbr*|tun*|tap*)
+                # Skip these
+                ;;
+            *)
+                if [[ -d "/sys/class/net/$iface_name" ]]; then # Ensure it's a directory (valid interface)
+                    local status
+                    status=$(ip link show "$iface_name" 2>/dev/null | grep -q "state UP" && echo "UP" || echo "DOWN")
+                    iface_options+=("$iface_name" "$iface_name ($status)")
+                fi
+                ;;
+        esac
+    done
 
     if [[ ${#iface_options[@]} -eq 0 ]]; then # Check if any options were generated
         show_error "No suitable network interfaces found to configure." && return 1

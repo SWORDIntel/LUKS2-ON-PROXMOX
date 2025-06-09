@@ -2,3 +2,5 @@
 [INFO] 2025-06-09 05:39:42 - Proxmox environment detected. Adjusting BASE_PACKAGES to exclude GRUB.
 [INFO] 2025-06-09 05:39:42 - Proxmox environment detected. ZFS packages will be managed by Proxmox.
 [TEST_WRITE] 2025-06-09 05:41:22 - Fallback logger initializing. Target: /home/demo/Documents/LUKS2-ON-PROXMOX-ZFS-Native/package_management_fallback.log
+[TEST_WRITE] 2025-06-09 05:43:06 - Fallback logger initializing. Target: /home/demo/Documents/LUKS2-ON-PROXMOX-ZFS-Native/package_management_fallback.log
+[TEST_WRITE] 2025-06-09 05:43:52 - Fallback logger initializing. Target: /home/demo/Documents/LUKS2-ON-PROXMOX-ZFS-Native/package_management_fallback.log

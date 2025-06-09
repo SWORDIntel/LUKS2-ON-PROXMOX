@@ -27,20 +27,6 @@ else
     fi
 fi
 
-# Helper function to check if an item is in a list (array)
-# Usage: is_package_in_list "item_to_find" "${array[@]}"
-is_package_in_list() {
-    local item="$1"
-    shift
-    local arr=("$@")
-    for element in "${arr[@]}"; do
-        if [[ "$element" == "$item" ]]; then
-            return 0 # Found
-        fi
-    done
-    return 1 # Not found
-}
-
 # Fallback logging functions if ui_functions.sh is not available or fails
 if ! command -v log_info &> /dev/null; then
     # SCRIPT_DIR is determined at the top of the script
@@ -55,11 +41,8 @@ if ! command -v log_info &> /dev/null; then
     # Ensure log directory exists and perform a test write
     mkdir -p "$(dirname "$_FALLBACK_LOG_TARGET")"
     echo "[TEST_WRITE] $(date '+%Y-%m-%d %H:%M:%S') - Fallback logger initializing. Target: ${_FALLBACK_LOG_TARGET}" >> "$_FALLBACK_LOG_TARGET"
-    if [[ $? -eq 0 ]]; then
-        echo "Fallback log test write SUCCEEDED." >&2
-    else
-        echo "Fallback log test write FAILED. Fallback logging to file will not work." >&2
-    fi
+    # Note: The explicit check of $? for the echo above is removed as per shellcheck SC2320.
+    # We rely on set -e or the script's overall error handling for critical failures here.
 
     # Define all core logging functions to use the fallback target
     log_info() { echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - $*" >> "$_FALLBACK_LOG_TARGET"; }
@@ -80,6 +63,22 @@ if ! command -v log_info &> /dev/null; then
     show_error_stdout() { show_error "$*"; }
     show_warning_stdout() { show_warning "$*"; }
 fi
+
+# Helper function to check if an item is in a list (array)
+# Usage: is_package_in_list "item_to_find" "${array[@]}"
+is_package_in_list() {
+    local item="$1"
+    shift
+    local arr=("$@")
+    for element in "${arr[@]}"; do
+        if [[ "$element" == "$item" ]]; then
+            return 0 # Found
+        fi
+    done
+    return 1 # Not found
+}
+
+
 
 # --- APT Configuration Management for populate_offline_cache ---
 # Proxmox VE 8 (Bookworm) specific APT configuration
@@ -218,7 +217,7 @@ Pin-Priority: 990
 EOF
     # Check if file exists and content matches
     # Using temporary file instead of process substitution to avoid /dev/fd issues
-    local temp_prefs=$(mktemp)
+    local temp_prefs; temp_prefs=$(mktemp)
     echo -n "$proxmox_prefs_content" > "$temp_prefs"
     if [[ ! -f "$prefs_path" ]] || ! cmp -s "$temp_prefs" "$prefs_path"; then
         # Clean up temp file after the comparison is done
@@ -474,7 +473,7 @@ _configure_proxmox_apt_sources() {
     if [[ -f "$PINNING_FILE" ]]; then
         # Check if the exact pinning content we want is already there
         # Using temporary file instead of process substitution to avoid /dev/fd issues
-        local temp_pinning=$(mktemp)
+        local temp_pinning; temp_pinning=$(mktemp)
         echo -e "$PINNING_CONTENT" > "$temp_pinning"
         if cmp -s "$temp_pinning" "$PINNING_FILE"; then
             rm -f "$temp_pinning"
@@ -627,7 +626,7 @@ ensure_packages_installed() {
             if [[ ${#deb_files_to_install[@]} -gt 0 ]]; then
                 log_info "Offline install: Attempting dpkg -i for: ${deb_files_to_install[*]}"
                 # shellcheck disable=SC2086 # We want word splitting for the deb files
-                dpkg -i ${deb_files_to_install[@]} &>> "$LOG_FILE"
+                dpkg -i "${deb_files_to_install[@]}" &>> "$LOG_FILE"
             else
                 log_info "Offline install: No .deb files to install after filtering."
             fi
@@ -771,7 +770,7 @@ ensure_essential_packages() {
     )
     
     # Remove any duplicates - using temporary file instead of process substitution to avoid /dev/fd issues
-    local temp_pkglist=$(mktemp)
+    local temp_pkglist; temp_pkglist=$(mktemp)
     printf '%s\n' "${essential_packages[@]}" | sort -u > "$temp_pkglist"
     essential_packages=()
     while IFS= read -r pkg; do
@@ -827,7 +826,7 @@ prepare_installer_debs() {
         )
         
         # Remove duplicates (if any) - using temporary file instead of process substitution to avoid /dev/fd issues
-        local temp_pkglist=$(mktemp)
+        local temp_pkglist; temp_pkglist=$(mktemp)
         printf '%s\n' "${all_packages[@]}" | sort -u > "$temp_pkglist"
         all_packages=()
         while IFS= read -r pkg; do

@@ -56,7 +56,7 @@ _copy_system_with_progress() {
         show_error "'pv' (Pipe Viewer) is not installed. Cannot show progress."
         show_progress "Copying system to RAM disk (no progress available)..."
         # Fallback to standard rsync without progress monitoring
-        rsync -axq --exclude={"/proc/*","/sys/*","/dev/*","/run/*","/mnt/*","/media/*","/tmp/*","$RAMDISK_MNT/*"} / "$RAMDISK_MNT/"
+        rsync -axq --exclude={"'/proc/*'","'/sys/*'","'/dev/*'","'/run/*'","'/mnt/*'","'/media/*'","'/tmp/*'","'$RAMDISK_MNT/*'","'/home/*/.cache/*'","'/root/.cache/*'","'/var/cache/*'","'/var/tmp/*'"} / "$RAMDISK_MNT/"
         return $?
     fi
 
@@ -66,17 +66,18 @@ _copy_system_with_progress() {
     show_progress "Copying system to RAM disk..."
     # Use tar to stream files, pv to show progress, and tar to extract in the destination.
     # This is a very common, fast, and reliable pattern.
-    (cd / && tar --exclude={"./proc","./sys","./dev","./run","./mnt","./media","./tmp","./mnt/ramdisk"} -cf - .) | \
+    (cd / && tar --exclude={"./proc","./sys","./dev","./run","./mnt","./media","./tmp","./mnt/ramdisk","./home/*/.cache","./root/.cache","./var/cache","./var/tmp/*"} -cf - .) | \
     pv -s "$total_size" -N "Copying" | \
     (cd "$RAMDISK_MNT" && tar -xf -)
     
     # The exit code of a pipeline is the exit code of the last command. `tar -x` should be 0.
     # We check pipe status to ensure all parts of the pipe succeeded.
-    if [[ "${PIPESTATUS[0]}" -eq 0 && "${PIPESTATUS[2]}" -eq 0 ]]; then
-        return 0
-    else
-        log_error "Failed during tar|pv|tar pipeline. Tar-Create: ${PIPESTATUS[0]}, PV: ${PIPESTATUS[1]}, Tar-Extract: ${PIPESTATUS[2]}"
+    if [[ "${PIPESTATUS[0]}" -ne 0 || "${PIPESTATUS[2]}" -ne 0 ]]; then
+        log_error "Error during system copy to RAM disk (tar exit codes: ${PIPESTATUS[0]}, pv: ${PIPESTATUS[1]}, tar: ${PIPESTATUS[2]}). Check logs."
         return 1
+    else
+        log_info "System copy to RAM disk successful."
+        return 0
     fi
 }
 
@@ -112,9 +113,9 @@ prepare_and_pivot_to_ram() {
     
     # 1. Determine size and create RAM disk.
     local ramdisk_size_gb
-    ramdisk_size_gb=$(_get_recommended_ramdisk_size)
-    if [[ $? -ne 0 ]]; then
-        exit 1 # Error message already shown by helper.
+    if ! ramdisk_size_gb=$(_get_recommended_ramdisk_size); then
+        log_error "Failed to determine recommended RAM disk size. Cannot proceed."
+        exit 1 # Error message also shown by helper, but good to be explicit here.
     fi
 
     show_progress "Creating a ${ramdisk_size_gb}GB filesystem in RAM at $RAMDISK_MNT..."
@@ -123,7 +124,7 @@ prepare_and_pivot_to_ram() {
         show_error "Failed to mount RAM disk. Check kernel logs and available memory."
         exit 1
     fi
-    trap "umount -lf '$RAMDISK_MNT' &>/dev/null" EXIT # Add cleanup trap
+    trap 'umount -lf "$RAMDISK_MNT" &>/dev/null; rm -rf "$RAMDISK_MNT" &>/dev/null' EXIT # Add cleanup trap for mount and directory
 
     # 2. Copy the system.
     if ! _copy_system_with_progress; then
@@ -177,9 +178,11 @@ prepare_and_pivot_to_ram() {
 
     # 7. Unmount and clean up. The trap will handle this, but we can do it explicitly.
     log_info "Cleaning up RAM disk environment..."
-    umount -l "$RAMDISK_MNT$LOG_FILE" &>> "$LOG_FILE"
-    umount -R -l "$RAMDISK_MNT/dev" "$RAMDISK_MNT/proc" "$RAMDISK_MNT/sys" &>> "$LOG_FILE"
-    umount -lf "$RAMDISK_MNT" &>> "$LOG_FILE"
+    {
+        umount -l "$RAMDISK_MNT"
+        umount -R -l "$RAMDISK_MNT/dev" "$RAMDISK_MNT/proc" "$RAMDISK_MNT/sys"
+        umount -lf "$RAMDISK_MNT"
+    } &>> "$LOG_FILE"
     
     trap - EXIT # Clear the trap since we cleaned up manually.
     

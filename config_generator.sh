@@ -274,7 +274,7 @@ gather_network_options() {
         # Basic validation for DNS servers
         IFS=',' read -ra dns_array <<< "${CONFIG_VARS[NET_DNS]}"
         for dns_ip in "${dns_array[@]}"; do
-            local trimmed_dns_ip=$(echo "$dns_ip" | xargs) 
+            local trimmed_dns_ip; trimmed_dns_ip=$(echo "$dns_ip" | xargs) 
             if ! [[ "$trimmed_dns_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
                 show_error "Invalid DNS server IP format ('$trimmed_dns_ip')."
                 return 1

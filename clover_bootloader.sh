@@ -111,8 +111,8 @@ install_enhanced_clover_bootloader() {
     show_progress "Preparing to download Clover bootloader..."
     local clover_url="${CONFIG_VARS[CLOVER_DOWNLOAD_URL]:-https://github.com/CloverHackyColor/CloverBootloader/releases/download/5157/CloverV2-5157.zip}"
     local clover_zip_sha256sum="${CONFIG_VARS[CLOVER_ZIP_SHA256SUM]:-}"
-    local clover_zip_path="$TEMP_DIR/$(basename "$clover_url")"
-    local clover_local_resource_path="${SCRIPT_DIR}/resources/$(basename "$clover_url")"
+    local clover_zip_path; clover_zip_path="$TEMP_DIR/$(basename "$clover_url")"
+    local clover_local_resource_path; clover_local_resource_path="${SCRIPT_DIR}/resources/$(basename "$clover_url")"
 
     if ! wget -T 30 -t 3 -O "$clover_zip_path" "$clover_url" &>> "$LOG_FILE"; then
         show_warning "Download failed. Attempting to use local resource..."
@@ -140,16 +140,27 @@ install_enhanced_clover_bootloader() {
     # --- 5. Extract and Copy Clover Files ---
     show_progress "Extracting and copying Clover files..."
     local clover_extract_dir="$TEMP_DIR/CloverExtract"
-    rm -rf "$clover_extract_dir" && mkdir -p "$clover_extract_dir"
+    rm -rf "$clover_extract_dir"
+    mkdir -p "$clover_extract_dir"
     
     # Use the determined extractor command
     case "$extractor_command" in
-        7z) 7z x -y "$clover_zip_path" -o"$clover_extract_dir" &>> "$LOG_FILE" ;;
-        unzip) unzip -q -o "$clover_zip_path" -d "$clover_extract_dir" &>> "$LOG_FILE" ;;
+        7z) if ! 7z x "$clover_zip_path" -o"$clover_extract_dir" -y &>> "$LOG_FILE"; then
+            show_error "Failed to extract Clover."
+            umount "$clover_mount" &>> "$LOG_FILE"
+            return 11 # Extraction failure
+        fi
+        ;;
+        unzip) if ! unzip -q -o "$clover_zip_path" -d "$clover_extract_dir" &>> "$LOG_FILE"; then
+            show_error "Failed to extract Clover."
+            umount "$clover_mount" &>> "$LOG_FILE"
+            return 11 # Extraction failure
+        fi
+        ;;
     esac
 
-    if [ $? -ne 0 ] || [ -z "$(ls -A "$clover_extract_dir" 2>/dev/null)" ]; then
-        show_error "Failed to extract Clover or extraction resulted in an empty directory."
+    if [ -z "$(ls -A "$clover_extract_dir" 2>/dev/null)" ]; then
+        show_error "Extraction resulted in an empty directory."
         umount "$clover_mount" &>> "$LOG_FILE"
         return 11 # Extraction failure
     fi
@@ -227,8 +238,8 @@ CLOVER_CONFIG
     # ANNOTATION: More robust and atomic method to get disk and partition number.
     local disk_info
     disk_info=$(lsblk -no PKNAME,PARTN "$clover_efi")
-    local clover_disk_for_efibootmgr="/dev/$(echo "$disk_info" | awk '{print $1}')"
-    local part_num=$(echo "$disk_info" | awk '{print $2}')
+    local clover_disk_for_efibootmgr; clover_disk_for_efibootmgr="/dev/$(echo "$disk_info" | awk '{print $1}')"
+    local part_num; part_num=$(echo "$disk_info" | awk '{print $2}')
 
     if [[ ! -b "$clover_disk_for_efibootmgr" ]] || ! [[ "$part_num" =~ ^[0-9]+$ ]]; then
         show_error "Could not reliably determine disk/partition for $clover_efi. Aborting."

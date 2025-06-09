@@ -99,8 +99,8 @@ check_yubikey_zfs_setup() {
     else
         log_success "YubiKey ZFS config file $ykzfs_conf_path found."
         # Verify content
-        local conf_uuid=$(grep '^YUBIKEY_ZFS_KEY_LUKS_UUID=' "$ykzfs_conf_path" | sed -e 's/.*="//' -e 's/"$//')
-        local conf_key_path=$(grep '^ZFS_KEYFILE_RELATIVE_PATH=' "$ykzfs_conf_path" | sed -e 's/.*="//' -e 's/"$//')
+        local conf_uuid; conf_uuid=$(grep '^YUBIKEY_ZFS_KEY_LUKS_UUID=' "$ykzfs_conf_path" | sed -e 's/.*="//' -e 's/"$//')
+        local conf_key_path; conf_key_path=$(grep '^ZFS_KEYFILE_RELATIVE_PATH=' "$ykzfs_conf_path" | sed -e 's/.*="//' -e 's/"$//')
 
         if [[ "$conf_uuid" != "${CONFIG_VARS[YUBIKEY_KEY_PART_UUID]}" ]]; then
             log_error "Mismatch in $ykzfs_conf_path: YUBIKEY_ZFS_KEY_LUKS_UUID is '$conf_uuid', expected '${CONFIG_VARS[YUBIKEY_KEY_PART_UUID]}'."
