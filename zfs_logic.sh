@@ -147,9 +147,11 @@ create_zfs_datasets() {
     # ANNOTATION: Apply dataset-specific tuning properties in bulk for clarity.
     log_debug "Applying dataset-specific performance tuning..."
     show_progress "Tuning datasets for specific workloads..."
-    zfs set recordsize=64k "${pool_name}/var/log" &>> "$LOG_FILE"
-    zfs set compression=zstd-3 "${pool_name}/var/log" &>> "$LOG_FILE"
-    zfs set recordsize=1M "${pool_name}/var/lib/vz" &>> "$LOG_FILE"
+    {
+        zfs set recordsize=64k "${pool_name}/var/log"
+        zfs set compression=zstd-3 "${pool_name}/var/log"
+        zfs set recordsize=1M "${pool_name}/var/lib/vz"
+    } &>> "$LOG_FILE"
 
     # Set the bootfs property on the pool
     log_debug "Setting bootfs to ${pool_name}/ROOT/pve-1"

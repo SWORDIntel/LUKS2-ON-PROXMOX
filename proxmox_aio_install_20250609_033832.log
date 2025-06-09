@@ -1,0 +1,34 @@
+Proxmox AIO Installer v6.2-AUDITED - Debug Log Started: Mon Jun  9 03:38:32 AM EDT 2025
+Installer script directory: /home/demo/LUKSZFS
+Log file initialized at: /home/demo/LUKSZFS/proxmox_aio_install_20250609_033832.log
+[DEBUG] Attempting to source clover_bootloader.sh...
+[DEBUG] SCRIPT_DIR is currently: '/home/demo/LUKSZFS'.
+[INFO]  Found clover_bootloader.sh at '/home/demo/LUKSZFS/clover_bootloader.sh'. Sourcing it.
+[DEBUG] clover_bootloader.sh: Initializing SCRIPT_DIR and sourcing ui_functions.sh.
+[DEBUG] SCRIPT_DIR is already set to: '/home/demo/LUKSZFS'.
+[DEBUG] Attempting to source ui_functions.sh.
+[INFO]  Found ui_functions.sh at '/home/demo/LUKSZFS/ui_functions.sh'. Sourcing it.
+[DEBUG] Sourcing '/home/demo/LUKSZFS/ui_functions.sh' completed.
+[DEBUG] Sourcing '/home/demo/LUKSZFS/clover_bootloader.sh' completed.
+[DEBUG] Attempting to source clover_bootloader.sh...
+[DEBUG] SCRIPT_DIR is currently: '/home/demo/LUKSZFS'.
+[INFO]  Found clover_bootloader.sh at '/home/demo/LUKSZFS/clover_bootloader.sh'. Sourcing it.
+[DEBUG] clover_bootloader.sh: Initializing SCRIPT_DIR and sourcing ui_functions.sh.
+[DEBUG] SCRIPT_DIR is already set to: '/home/demo/LUKSZFS'.
+[DEBUG] Attempting to source ui_functions.sh.
+[INFO]  Found ui_functions.sh at '/home/demo/LUKSZFS/ui_functions.sh'. Sourcing it.
+[DEBUG] Sourcing '/home/demo/LUKSZFS/ui_functions.sh' completed.
+[DEBUG] Sourcing '/home/demo/LUKSZFS/clover_bootloader.sh' completed.
+[DEBUG] Attempting to source clover_bootloader.sh...
+[DEBUG] SCRIPT_DIR is currently: '/home/demo/LUKSZFS'.
+[INFO]  Found clover_bootloader.sh at '/home/demo/LUKSZFS/clover_bootloader.sh'. Sourcing it.
+[DEBUG] clover_bootloader.sh: Initializing SCRIPT_DIR and sourcing ui_functions.sh.
+[DEBUG] SCRIPT_DIR is already set to: '/home/demo/LUKSZFS'.
+[DEBUG] Attempting to source ui_functions.sh.
+[INFO]  Found ui_functions.sh at '/home/demo/LUKSZFS/ui_functions.sh'. Sourcing it.
+[DEBUG] Sourcing '/home/demo/LUKSZFS/ui_functions.sh' completed.
+[DEBUG] Sourcing '/home/demo/LUKSZFS/clover_bootloader.sh' completed.
+[DEBUG] INSTALL_SOURCE determined by findmnt: 'overlay'
+[DEBUG] Initial path to evaluate for installer device: 'overlay'
+[DEBUG] --- BEGINNING DEBUG BLOCK FOR INSTALL_SOURCE (set -x) ---
+[DEBUG] About to run: lsblk -no pkname "overlay"

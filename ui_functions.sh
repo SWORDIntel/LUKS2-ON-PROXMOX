@@ -1,90 +1,134 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# FAILSAFE UI FUNCTIONS - NO COLORS, NO UNICODE, NO BULL
+# Simple, reliable functions that just work
 
-#############################################################
-# Logging and UI Functions (Refined Version)
-#
-# This script provides robust logging and terminal UI functions.
-# It is designed to be sourced by a main installer script.
-#############################################################
+# Guard against multiple sourcing
+if [ -n "${_UI_FUNCS_LOADED:-}" ]; then
+    return 0
+fi
+_UI_FUNCS_LOADED=1
 
-# --- Color and Symbol Definitions ---
-# Using tput for maximum terminal compatibility.
-# Only define if not already defined to avoid readonly variable conflicts
-[ -z "${BOLD-}" ] && BOLD=$(tput bold 2>/dev/null || true)
-[ -z "${BLUE-}" ] && BLUE=$(tput setaf 4 2>/dev/null || true)
-[ -z "${MAGENTA-}" ] && MAGENTA=$(tput setaf 5 2>/dev/null || true)
-[ -z "${YELLOW-}" ] && YELLOW=$(tput setaf 3 2>/dev/null || true)
-[ -z "${RED-}" ] && RED=$(tput setaf 1 2>/dev/null || true)
-[ -z "${RESET-}" ] && RESET=$(tput sgr0 2>/dev/null || true)
-
-# Using unicode characters for modern terminals.
-CHECK="✔"
-CROSS="✖"
-BULLET="•"
-WARN_ICON="⚠"
-
-# LOG_FILE is expected to be exported from the main script.
-# Example: export LOG_FILE="/var/log/my_installer.log"
-#
-#############################################################
-
-# Writes a debug message to the configured log file.
+# Debug logging - logs to LOG_FILE if available
 log_debug() {
-    # Ensure LOG_FILE is set and not empty before trying to write to it.
-    if [[ -n "${LOG_FILE:-}" ]]; then
-        # Using printf for portability and quoting to handle spaces correctly.
-        printf "[DEBUG][$(date '+%Y-%m-%d %H:%M:%S')] %s\n" "$1" >> "$LOG_FILE"
-    else
-        # Fallback if LOG_FILE is not set. Redirects to standard error.
-        printf "[DEBUG_FALLBACK][$(date '+%Y-%m-%d %H:%M:%S')] %s\n" "$1" >&2
+    [ -z "$1" ] && return 0
+    if [ -n "${LOG_FILE:-}" ]; then
+        printf "[DEBUG] %s: %s\n" "$(date +"%Y-%m-%d %H:%M:%S")" "$1" >> "${LOG_FILE}" 2>/dev/null || true
     fi
 }
 
-# Displays a centered, double-bordered header.
+# Simple yes/no prompt - returns 0 for yes, 1 for no
+prompt_yes_no() {
+    [ -z "$1" ] && return 1
+    local answer
+    
+    while true; do
+        printf "%s [y/n]: " "$1" >&2
+        read -r answer
+        case "${answer}" in
+            [Yy]*) return 0 ;;
+            [Nn]*) return 1 ;;
+            *) printf "Please answer yes or no.\n" >&2 ;;
+        esac
+    done
+}
+
+# Display a header with simple ASCII formatting
 show_header() {
     local text="$1"
-    local width=70
-    local padding=$(( (width - 2 - ${#text}) / 2 )) # Adjust for spaces around text
+    [ -z "$text" ] && text="Header"
+    local line="----------------------------------------"
     
-    # ANNOTATION: Replaced `seq` with a more efficient `printf | tr` method.
-    # This avoids forking a sub-process for `seq`.
-    local line
-    line=$(printf '%*s' "$width" '' | tr ' ' '═')
-
-    printf "\n%s%s%s%s\n" "${BLUE}" "${BOLD}" "${line}" "${RESET}"
-    printf "%s%s %*s%s%*s %s\n" "${BLUE}" "${BOLD}" "$padding" "" "$text" "$((width - 2 - ${#text} - padding))" "" "${RESET}"
-    printf "%s%s%s%s\n\n" "${BLUE}" "${BOLD}" "${line}" "${RESET}"
+    printf "\n%s\n" "$line"
+    printf "| %s\n" "$text"
+    printf "%s\n\n" "$line"
 }
 
-# Displays a major installation step.
+# Display a step label
 show_step() {
-    printf "\n%s%s[%s]%s %s%s%s\n" "${MAGENTA}" "${BOLD}" "$1" "${RESET}" "${BOLD}" "$2" "${RESET}"
+    local step="$1"
+    local desc="${2:-}"
+    
+    printf "\n[%s] %s\n" "$step" "$desc"
 }
 
-# Displays an informational progress message.
+# Show a progress message
 show_progress() {
-    printf "  %s %s\n" "${BULLET}" "$1"
+    [ -z "$1" ] && return 0
+    printf "  * %s\n" "$1"
 }
 
-# Displays a success message.
+# Show a success message
 show_success() {
-    printf "  %s %s\n" "${CHECK}" "$1"
+    [ -z "$1" ] && return 0
+    printf "  + SUCCESS: %s\n" "$1"
 }
 
-# Displays an error message to standard error, including script name and line number.
+# Show an error message
 show_error() {
-    # $1: error message
-    # $2: script name (optional)
-    # $3: line number (optional)
     local message="$1"
-    local script_name="${2:-$(basename "${BASH_SOURCE[1]:-$0}")}" # Caller script or current
-    local line_info="${3:+"at line $3"}" # Add 'at line' only if $3 is provided
-
-    printf "  %s %sERROR in %s %s: %s%s\n" "${CROSS}" "${RED}" "$script_name" "$line_info" "$message" "${RESET}" >&2
+    local script_name="${2:-$(basename "${BASH_SOURCE[1]:-$0}")}"
+    local line_num="${3:-}"
+    
+    local line_info=""
+    [ -n "$line_num" ] && line_info=" line $line_num"
+    
+    printf "\n  ! ERROR in %s%s: %s\n\n" "$script_name" "$line_info" "$message" >&2
 }
 
-# Displays a warning message.
+# Show a warning message
+
+# Select an option from a list
+# Usage: _select_option_from_list "Prompt message" "Option 1" "Option 2" ...
+# Returns 0 on success, 1 on cancellation/empty input.
+# Selected option is echoed to stdout.
+_select_option_from_list() {
+    local prompt_msg="$1"
+    shift
+    local options=("$@")
+    local num_options=${#options[@]}
+    local choice
+    local i
+
+    log_debug "_select_option_from_list: Received prompt: $prompt_msg"
+    local opt_idx
+    for opt_idx in "${!options[@]}"; do
+        log_debug "_select_option_from_list: Option $opt_idx: '${options[$opt_idx]}'"
+    done
+
+    if [[ $num_options -eq 0 ]]; then
+        log_debug "_select_option_from_list called with no options."
+        return 1 # No options to choose from
+    fi
+
+    printf "\n%s\n" "$prompt_msg"
+    for i in $(seq 0 $((num_options - 1))); do
+        printf "  %2d) %s\n" $((i + 1)) "${options[$i]}"
+    done
+    printf "   q) Quit/Cancel\n"
+
+    while true; do
+        read -r -p "Enter your choice (1-$num_options or q): " choice
+        choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]') # Normalize to lowercase
+
+        if [[ -z "$choice" || "$choice" == "q" || "$choice" == "cancel" ]]; then
+            log_debug "_select_option_from_list: User cancelled."
+            return 1 # Cancelled
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 1 && "$choice" -le $num_options ]]; then
+            log_debug "_select_option_from_list: User selected option $choice: ${options[$((choice - 1))]}"
+            echo "${options[$((choice - 1))]}" # Echo selected option text
+            return 0 # Success
+        else
+            printf "Invalid choice. Please enter a number between 1 and %s, or 'q' to quit.\n" "$num_options" >&2
+        fi
+    done
+}
+
+# Show a warning message
 show_warning() {
-    # ANNOTATION: Placed the warning icon before the text for better visual flow.
-    printf "  %s%s %s%s\n" "${YELLOW}" "${WARN_ICON}" "$1" "${RESET}"
+    [ -z "$1" ] && return 0
+    printf "  ! WARNING: %s\n" "$1"
 }
+
+# Show a message

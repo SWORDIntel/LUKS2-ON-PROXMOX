@@ -4,21 +4,30 @@
 
 # Source the enhanced Clover bootloader installation script
 # Ensure SCRIPT_DIR is available or adjust path accordingly
+log_debug "Attempting to source clover_bootloader.sh..."
+log_debug "SCRIPT_DIR is currently: '${SCRIPT_DIR:-not set}'."
+
 if [[ -n "$SCRIPT_DIR" ]] && [[ -f "$SCRIPT_DIR/clover_bootloader.sh" ]]; then
+    log_info "Found clover_bootloader.sh at '$SCRIPT_DIR/clover_bootloader.sh'. Sourcing it."
     # shellcheck source=clover_bootloader.sh
     source "$SCRIPT_DIR/clover_bootloader.sh"
+    log_debug "Sourcing '$SCRIPT_DIR/clover_bootloader.sh' completed."
 elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/clover_bootloader.sh" ]]; then
+    log_info "SCRIPT_DIR not set or clover_bootloader.sh not found there. Found clover_bootloader.sh at '$(dirname "${BASH_SOURCE[0]}")/clover_bootloader.sh' (relative to this script). Sourcing it."
     # shellcheck source=clover_bootloader.sh
     source "$(dirname "${BASH_SOURCE[0]}")/clover_bootloader.sh"
+    log_debug "Sourcing from '$(dirname "${BASH_SOURCE[0]}")/clover_bootloader.sh' completed."
 else
+    log_error "Failed to find clover_bootloader.sh using SCRIPT_DIR ('${SCRIPT_DIR:-not set}/clover_bootloader.sh') or relative path ('$(dirname "${BASH_SOURCE[0]}")/clover_bootloader.sh')."
     # If log_fatal is available (common_utils sourced), use it.
     if type log_fatal &>/dev/null; then
-        log_fatal "clover_bootloader.sh not found. Cannot proceed with Clover installation."
+        log_fatal "clover_bootloader.sh not found. This is a critical dependency for Clover installation."
     else
-        echo "ERROR: clover_bootloader.sh not found. Cannot proceed with Clover installation." >&2
+        echo "CRITICAL ERROR: clover_bootloader.sh not found. Cannot proceed with Clover installation." >&2
     fi
     # Depending on installer structure, you might exit or return an error code.
-    # For now, we'll assume the calling function handles the missing dependency.
+    # For now, we'll assume the calling function handles the missing dependency, but this is a critical failure for this script's purpose.
+    # Consider adding 'return 1' here if this script is sourced by another that can handle the failure.
 fi
 
 # Wrapper function for Clover installation, maintaining the original expected function name.
@@ -34,7 +43,7 @@ install_clover_bootloader() {
     fi
 
     # Call the main function from the sourced script
-    install_enhanced_clover_bootloader
+    install_enhanced_clover_bootloader "$@"
     local clover_install_status=$?
 
     # Log and potentially show messages based on the return status from the enhanced installer

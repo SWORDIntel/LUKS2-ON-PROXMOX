@@ -54,7 +54,7 @@ validate_system_requirements() {
     fi
     
     # Check for other required software
-    for cmd in cryptsetup zpool zfs dialog awk; do
+    for cmd in cryptsetup zpool zfs awk; do
         if command -v "$cmd" >/dev/null; then
             log_success "Required command '$cmd' is available"
         else
@@ -391,5 +391,8 @@ generate_validation_report() {
     } > "$report_file"
     
     # Display report to user
-    dialog --title "Validation Results" --textbox "$report_file" 24 78
+    echo "--- Validation Report Start ---"
+    cat "$report_file"
+    echo "--- Validation Report End ---"
+    show_message "Report Generated" "Validation report saved to $report_file. Press Enter to continue." && read -r
 }

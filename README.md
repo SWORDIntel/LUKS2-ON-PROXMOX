@@ -1,6 +1,8 @@
-# Proxmox VE Advanced Installer with ZFS on LUKS - STILLLLLLLL BROKEN AS OF THIS TIME
+# Proxmox VE Advanced Installer with ZFS on LUKS
 
 A customizable, robust, and comprehensive installer script for setting up Proxmox VE with advanced features including RAM-based installation, ZFS on LUKS encryption, health checks, and extensive validation capabilities.
+
+The installer has been refactored to use a consistent plain-text command-line interface (CLI) for all user interactions, removing dependencies on graphical or semi-graphical utilities like `dialog` to enhance robustness in minimal or debug environments.
 
 ## Features
 
@@ -41,7 +43,7 @@ A customizable, robust, and comprehensive installer script for setting up Proxmo
 * **Validation Mode:**
   * **Pre-Flight Checks:** Validate system requirements and configuration without making changes.
   * **Detailed Reporting:** Generates comprehensive validation reports on system readiness.
-  * **Interactive & Non-Interactive:** Supports both dialog-based and automated validation.
+  * **Interactive & Non-Interactive:** Supports both plain-text interactive prompts and automated validation.
 
 * **Health Checks:**
   * **Incremental Verification:** Performs health checks after each major installation step.
@@ -64,7 +66,7 @@ A customizable, robust, and comprehensive installer script for setting up Proxmo
 * **Configuration Options:**
   * **Command-Line Arguments:** Extensive CLI options for controlling installation behavior.
   * **Configuration Files:** Support for pre-defined configuration files for unattended installation.
-  * **Interactive Dialogs:** User-friendly dialogs for guided installation when needed.
+  * **Interactive CLI Prompts:** User-friendly plain-text prompts for guided installation, ensuring compatibility in minimal environments.
 
 * **Robust Error Handling:**
   * **Comprehensive Logging:** Detailed logs of all installation steps and decisions.
@@ -165,12 +167,12 @@ The installer is built with a modular architecture:
 * `validation_module.sh` - System compatibility and configuration validation
 * `health_checks.sh` - Post-installation verification and health checks
 * `smart_tools.sh` - SMART disk diagnostic tools
-* `zfs_setup.sh` - ZFS pool creation and configuration
-* `luks_setup.sh` - LUKS encryption setup
-* `network_setup.sh` - Network configuration
+* `zfs_logic.sh` - ZFS pool creation and configuration
+* `encryption_logic.sh` - LUKS encryption setup
+* `network_config.sh` - Network configuration
 * `ramdisk_setup.sh` - RAM environment preparation
-* `bootloader_setup.sh` - Bootloader installation and configuration
-* `download_debs.sh` - Package download utility for offline installation
+* `bootloader_logic.sh` - Bootloader installation and configuration
+* `package_management.sh` - Package download utility for offline installation
 
 ## Configuration File Format
 
