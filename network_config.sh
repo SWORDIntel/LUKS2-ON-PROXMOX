@@ -71,7 +71,7 @@ _configure_network_interactive() {
         interfaces_only_paths+=("${iface_options[$i]}")
         echo "  $i_num. ${iface_options[$i+1]}" # Display description part
     done
-
+    
     if [[ $i_num -eq 0 ]]; then # Double check no interfaces listed
             show_error "No network interfaces listed for selection." && return 1
     fi
@@ -92,9 +92,9 @@ _configure_network_interactive() {
     done
     log_debug "User selected interface: $selected_iface"
 
-    local ip_addr
+    local ip_addr 
     read -r -p "Enter IP address with CIDR for $selected_iface (e.g., 192.168.1.100/24), or 'c' to cancel: " ip_addr
-    if [[ "$ip_addr" == [cC] ]] || [[ -z "$ip_addr" ]]; then
+    if [[ "$ip_addr" == [cC] ]] || [[ -z "$ip_addr" ]]; then 
         log_debug "IP address input cancelled or empty."
         return 1
     fi
@@ -102,9 +102,9 @@ _configure_network_interactive() {
         show_error "Invalid IP/CIDR format." && return 1
     fi
 
-    local gateway
+    local gateway 
     read -r -p "Enter gateway IP for $selected_iface (e.g., 192.168.1.1), or 'c' to cancel: " gateway
-    if [[ "$gateway" == [cC] ]] || [[ -z "$gateway" ]]; then
+    if [[ "$gateway" == [cC] ]] || [[ -z "$gateway" ]]; then 
         log_debug "Gateway input cancelled or empty."
         return 1
     fi
@@ -191,11 +191,11 @@ download_offline_packages() {
     fi
 
     echo # Newline for clarity
-    show_header "Air-Gapped Installation Note"
+    show_header "Air-Gapped Installation Note" 
     echo "For use on an air-gapped machine, ensure you copy the ENTIRE"
     echo "installer directory (including the 'debs' folder) to your"
     echo "installation media."
-    echo
+    echo 
     read -r -p "Press Enter to continue..."
     log_debug "Exiting function: ${FUNCNAME[0]}"
     return 0
