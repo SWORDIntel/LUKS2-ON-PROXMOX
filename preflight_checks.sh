@@ -34,7 +34,19 @@ _prompt_user_yes_no() {
 
 _check_for_proxmox_zfs() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    PROXMOX_ZFS_DETECTED="false" # Default to not detected
+    
+    # If PROXMOX_ZFS_DETECTED is already true (e.g., forced by installer.sh), respect it.
+    # Ensure to check the variable's value as a string.
+    if [[ "${PROXMOX_ZFS_DETECTED:-false}" == "true" ]]; then
+        log_info "PROXMOX_ZFS_DETECTED is already 'true' (likely forced). Skipping rpool check."
+        # Ensure it remains exported if it was set by installer.sh
+        export PROXMOX_ZFS_DETECTED
+        log_debug "Exiting function: ${FUNCNAME[0]} - PROXMOX_ZFS_DETECTED=${PROXMOX_ZFS_DETECTED}"
+        return 0
+    fi
+
+    # If not pre-set to true, perform detection.
+    PROXMOX_ZFS_DETECTED="false" # Default to not detected for this function's scope if not pre-set.
 
     if command -v zpool &>/dev/null && zpool list -H -o name rpool &>/dev/null; then
         log_debug "ZFS pool 'rpool' found."
@@ -48,9 +60,11 @@ _check_for_proxmox_zfs() {
             PROXMOX_ZFS_DETECTED="true"
         else
             log_debug "Pool 'rpool' exists, but no definitive Proxmox datasets like 'rpool/ROOT/pve-1' or 'rpool/data' found. Assuming not a standard Proxmox ZFS setup for now."
+            # PROXMOX_ZFS_DETECTED remains false
         fi
     else
         log_debug "ZFS pool 'rpool' not found."
+        # PROXMOX_ZFS_DETECTED remains false
     fi
 
     export PROXMOX_ZFS_DETECTED # Make it available to other sourced scripts
@@ -202,16 +216,23 @@ Ensure you intend to operate on this existing environment or select appropriate 
 
     # ANNOTATION: Simplified ZFS module check. More direct logic.
     log_debug "Checking ZFS kernel module..."
-    if lsmod | grep -q "^zfs"; then
-        show_success "ZFS kernel module is loaded."
-    else
+    if [[ "${PROXMOX_ZFS_DETECTED:-false}" == "true" ]]; then
+        log_info "Proxmox mode: ZFS kernel module management is handled by Proxmox. Skipping explicit modprobe."
+        if lsmod | grep -q '^zfs '; then
+            show_success "ZFS module is already loaded (as expected in Proxmox)."
+        else
+            show_warning "ZFS module not currently loaded. Proxmox is expected to handle this. Continuing."
+        fi
+    elif ! lsmod | grep -q '^zfs '; then
         show_warning "ZFS module not loaded. Attempting to load..."
-        if modprobe zfs &>> "$LOG_FILE"; then
+        if modprobe zfs >> "$LOG_FILE"; then
             show_success "ZFS module loaded successfully."
         else
-            show_error "Failed to load ZFS module. Ensure ZFS packages are correctly installed."
-            exit 1
+            show_error "Failed to load ZFS module. Ensure ZFS packages are correctly installed for a non-Proxmox system."
+            exit 1 
         fi
+    else
+        show_success "ZFS module is already loaded."
     fi
 
     log_debug "All pre-flight checks completed."

@@ -217,12 +217,19 @@ Pin: release o=PVE
 Pin-Priority: 990
 EOF
     # Check if file exists and content matches
-    if [[ ! -f "$prefs_path" ]] || ! cmp -s <(echo -n "$proxmox_prefs_content") "$prefs_path"; then
+    # Using temporary file instead of process substitution to avoid /dev/fd issues
+    local temp_prefs=$(mktemp)
+    echo -n "$proxmox_prefs_content" > "$temp_prefs"
+    if [[ ! -f "$prefs_path" ]] || ! cmp -s "$temp_prefs" "$prefs_path"; then
+        # Clean up temp file after the comparison is done
+        rm -f "$temp_prefs"
         echo "$proxmox_prefs_content" > "$prefs_path"
         log_info "Created/Updated Proxmox preferences at $prefs_path"
         files_changed=true
     else
         log_debug "Proxmox preferences file $prefs_path already up-to-date."
+        # Clean up temp file if we're not updating the file
+        rm -f "$temp_prefs"
     fi
     
     if [[ "$files_changed" == true ]]; then
@@ -281,6 +288,10 @@ EOF
 : "${SCRIPT_DIR:=.}"
 : "${DEBS_DIR:=${SCRIPT_DIR}/debs}"
 : "${LOG_FILE:=${SCRIPT_DIR}/installer.log}"
+
+# Always assume Proxmox environment for package management
+export PROXMOX_ZFS_DETECTED="true"
+log_info "Package management: Forcing PROXMOX_ZFS_DETECTED=true to always skip GRUB and core ZFS packages"
 
 # Ensure required directories exist
 mkdir -p "$DEBS_DIR" &>/dev/null
@@ -462,7 +473,11 @@ _configure_proxmox_apt_sources() {
     local needs_pinning_update=true
     if [[ -f "$PINNING_FILE" ]]; then
         # Check if the exact pinning content we want is already there
-        if cmp -s <(echo -e "$PINNING_CONTENT") "$PINNING_FILE"; then
+        # Using temporary file instead of process substitution to avoid /dev/fd issues
+        local temp_pinning=$(mktemp)
+        echo -e "$PINNING_CONTENT" > "$temp_pinning"
+        if cmp -s "$temp_pinning" "$PINNING_FILE"; then
+            rm -f "$temp_pinning"
             needs_pinning_update=false
             log_info "Proxmox APT pinning already correctly configured in $PINNING_FILE."
         else
@@ -755,8 +770,14 @@ ensure_essential_packages() {
         "pv"     # For RAM disk progress monitoring
     )
     
-    # Remove any duplicates
-    readarray -t essential_packages < <(printf '%s\n' "${essential_packages[@]}" | sort -u)
+    # Remove any duplicates - using temporary file instead of process substitution to avoid /dev/fd issues
+    local temp_pkglist=$(mktemp)
+    printf '%s\n' "${essential_packages[@]}" | sort -u > "$temp_pkglist"
+    essential_packages=()
+    while IFS= read -r pkg; do
+        essential_packages+=("$pkg")
+    done < "$temp_pkglist"
+    rm -f "$temp_pkglist"
     
     log_debug "Installing ${#essential_packages[@]} essential packages"
     ensure_packages_installed "${essential_packages[@]}"
@@ -805,8 +826,14 @@ prepare_installer_debs() {
             "${YUBIKEY_PACKAGES[@]}"
         )
         
-        # Remove duplicates (if any)
-        readarray -t all_packages < <(printf '%s\n' "${all_packages[@]}" | sort -u)
+        # Remove duplicates (if any) - using temporary file instead of process substitution to avoid /dev/fd issues
+        local temp_pkglist=$(mktemp)
+        printf '%s\n' "${all_packages[@]}" | sort -u > "$temp_pkglist"
+        all_packages=()
+        while IFS= read -r pkg; do
+            all_packages+=("$pkg")
+        done < "$temp_pkglist"
+        rm -f "$temp_pkglist"
         
         log_debug "Preparing ${#all_packages[@]} packages: ${all_packages[*]}"
         if ! populate_offline_cache "${all_packages[@]}"; then

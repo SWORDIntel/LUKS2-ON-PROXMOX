@@ -4,6 +4,20 @@
 # Network Configuration Functions (Refactored for Robustness)
 #############################################################
 
+# Source UI functions if not already available (for log_warning etc.)
+if ! command -v log_info &> /dev/null && [ -f "./ui_functions.sh" ]; then
+    source ./ui_functions.sh
+elif ! command -v log_info &> /dev/null && [ -f "../ui_functions.sh" ]; then # If called from a subdir like tests
+    source ../ui_functions.sh
+elif ! command -v log_info &> /dev/null ; then
+    # Minimal fallback if ui_functions.sh is truly missing
+    log_warning() { echo "[WARNING] $1" >&2; }
+    log_info() { echo "[INFO] $1" >&2; }
+    log_debug() { echo "[DEBUG] $1" >&2; }
+    show_error() { echo "[ERROR] $1" >&2; }
+    show_warning() { echo "[WARNING] $1" >&2; }
+fi
+
 # ANNOTATION: DRY Principle - This helper function consolidates DNS configuration.
 # Configures system DNS resolvers with reliable public DNS servers.
 _configure_dns() {
@@ -56,7 +70,23 @@ _configure_network_interactive() {
     while read -r iface; do
         local status; status=$(ip link show "$iface" 2>/dev/null | grep -q "state UP" && echo "UP" || echo "DOWN")
         iface_options+=("$iface" "$iface ($status)") # Simplified for text menu
-    done < <(ls /sys/class/net | grep -vE '^(lo|docker|veth|virbr|tun|tap)')
+    # Using temporary file instead of process substitution to avoid /dev/fd issues
+    local temp_ifaces
+    temp_ifaces=$(mktemp /tmp/installer_ifaces.XXXXXX) # Use a more specific tmp file pattern
+    if [[ -z "$temp_ifaces" || ! -f "$temp_ifaces" ]]; then
+        show_error "Failed to create temporary file for interface listing."
+        # rm -f "$temp_ifaces" # Clean up if mktemp created a name but not file
+        return 1 # or handle error appropriately
+    fi
+
+    if ! ls /sys/class/net | grep -vE '^(lo|docker|veth|virbr|tun|tap)' > "$temp_ifaces"; then
+        show_error "Failed to list network interfaces into temporary file."
+        rm -f "$temp_ifaces"
+        return 1
+    fi
+
+    done < "$temp_ifaces"
+    rm -f "$temp_ifaces"
 
     if [[ ${#iface_options[@]} -eq 0 ]]; then # Check if any options were generated
         show_error "No suitable network interfaces found to configure." && return 1

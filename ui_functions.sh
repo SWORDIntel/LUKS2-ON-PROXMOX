@@ -40,6 +40,18 @@ log_debug() {
     fi
 }
 
+# Writes an informational message to the configured log file.
+log_info() {
+    # Ensure LOG_FILE is set and not empty before trying to write to it.
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        # Using printf for portability and quoting to handle spaces correctly.
+        printf "[INFO][$(date '+%Y-%m-%d %H:%M:%S')] %s\n" "$1" >> "$LOG_FILE"
+    else
+        # Fallback if LOG_FILE is not set. Redirects to standard error.
+        printf "[INFO_FALLBACK][$(date '+%Y-%m-%d %H:%M:%S')] %s\n" "$1" >&2
+    fi
+}
+
 # Displays a centered, double-bordered header.
 show_header() {
     local text="$1"
@@ -58,7 +70,7 @@ show_header() {
 
 # Displays a major installation step.
 show_step() {
-    printf "\n%s%s[%s]%s %s%s%s\n" "${MAGENTA}" "${BOLD}" "$1" "${RESET}" "${BOLD}" "$2" "${RESET}"
+    printf "\n%s%s[%s]%s %s%s%s\n" "${MAGENTA}" "${BOLD}" "$1" "${RESET}" "${BOLD}" "${2:-}" "${RESET}"
 }
 
 # Displays an informational progress message.

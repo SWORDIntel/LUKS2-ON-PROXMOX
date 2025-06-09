@@ -51,6 +51,39 @@ readonly RED='\e[91m'
 # shellcheck disable=SC2034 # Used in sourced ui_functions.sh
 readonly GREEN='\e[92m'
 source ./ui_functions.sh
+
+# --- Proxmox ZFS Detection ---
+# This must happen BEFORE sourcing package_management.sh, as that script
+# defines BASE_PACKAGES based on whether a Proxmox environment is detected.
+echo "DEBUG_INSTALLER: Starting Proxmox detection." >&2
+if [[ "${FORCE_PROXMOX_MODE:-false}" == "true" ]]; then
+    echo "DEBUG_INSTALLER: FORCE_PROXMOX_MODE is true. Forcing Proxmox specific behavior." >&2
+    log_info "FORCE_PROXMOX_MODE is true. Forcing Proxmox specific behavior."
+    export PROXMOX_ZFS_DETECTED="true"
+else
+    echo "DEBUG_INSTALLER: FORCE_PROXMOX_MODE is not true or not set. Performing standard detection." >&2
+    if command -v pveversion >/dev/null 2>&1; then
+        echo "DEBUG_INSTALLER: pveversion command found." >&2
+        pve_version_output=$(pveversion -v 2>/dev/null)
+        echo "DEBUG_INSTALLER: pveversion -v output: '${pve_version_output}'" >&2
+        if [[ -n "$pve_version_output" && "$pve_version_output" == *"pve-manager/"* ]]; then
+            echo "DEBUG_INSTALLER: Proxmox environment DETECTED by pveversion." >&2
+            log_info "Proxmox environment detected (pveversion output indicates pve-manager)."
+            export PROXMOX_ZFS_DETECTED="true"
+        else
+            echo "DEBUG_INSTALLER: pveversion output does NOT confirm Proxmox manager." >&2
+            log_info "pveversion command found, but output does not confirm Proxmox manager. Treating as non-Proxmox."
+            export PROXMOX_ZFS_DETECTED="false"
+        fi
+    else
+        echo "DEBUG_INSTALLER: pveversion command NOT found." >&2
+        log_info "Proxmox environment NOT detected (pveversion command not found)."
+        export PROXMOX_ZFS_DETECTED="false"
+    fi
+fi
+echo "DEBUG_INSTALLER: PROXMOX_ZFS_DETECTED final value: '${PROXMOX_ZFS_DETECTED:-not_set_at_all}'" >&2
+# --- End Proxmox ZFS Detection ---
+
 source ./package_management.sh
 source ./network_config.sh
 source ./ramdisk_setup.sh
@@ -451,10 +484,13 @@ main() {
     export CONFIG_FILE_PATH="$config_file"
     
     # Initialize environment (creates temp dirs, sets traps)
-    init_environment
+    init_environment # From core_logic.sh
 
-    # Install dependencies early to ensure dialog and other tools are available
-    ensure_essential_packages
+    # 1. Attempt to configure network interfaces. This should happen before package installation.
+    ensure_network_connectivity || show_warning "Initial network setup attempt failed. Package downloads might be affected." # From network_config.sh
+
+    # 2. Install dependencies early to ensure dialog and other tools are available
+    ensure_essential_packages # From package_management.sh
     
     # Handle validation mode first as it doesn't require RAM pivot
     if [[ "$validate_only" == true ]]; then
@@ -462,7 +498,7 @@ main() {
         # Source the validation module specifically for this mode
         source ./validation_module.sh
         show_header "VALIDATION MODE"
-        ensure_network_connectivity || show_warning "Network connectivity issues may affect validation"
+        # ensure_network_connectivity || show_warning "Network connectivity issues may affect validation" # Network attempted earlier
         validate_installation
         log_debug "Validation completed, exiting..."
         exit 0
@@ -475,8 +511,8 @@ main() {
         log_debug "Execution environment: In RAM disk."
         show_header "SYSTEM RUNNING FROM RAM"
         
-        # 1. Configure network. This is the first step that needs it.
-        ensure_network_connectivity || show_warning "Could not establish network connection. Some features may fail."
+        # 1. Configure network. This was attempted when the script started.
+        # ensure_network_connectivity || show_warning "Could not establish network connection. Some features may fail." # Network attempted earlier
 
         # 2. Run the main installation logic.
         run_installation_logic
@@ -497,7 +533,7 @@ main() {
                 exit 1
             fi
             # Set up network and run installation directly.
-            ensure_network_connectivity || show_warning "Could not establish network connection."
+            # ensure_network_connectivity || show_warning "Could not establish network connection." # Network attempted earlier
             run_installation_logic
         else
             # 3. Standard path: Pivot to RAM.
