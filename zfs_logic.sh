@@ -83,7 +83,7 @@ setup_zfs_pool() {
                 echo # Move to next line
                 if [[ -z "$zfs_pass" ]]; then
                     show_error "ZFS passphrase cannot be empty. Please try again. (Ctrl+C to abort)"
-                    continue
+                    continue 
                 fi
                 read -r -s -p "Confirm ZFS passphrase: " zfs_pass_confirm
                 echo # Move to next line
