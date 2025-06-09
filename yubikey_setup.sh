@@ -13,43 +13,6 @@ fi
 
 log_debug "yubikey_setup.sh sourced"
 
-install_yubikey_tools() {
-    log_debug "Entering function: ${FUNCNAME[0]} (yubikey_setup.sh)"
-    # This function is intended to be run inside the chroot.
-    # Ensure LOG_FILE is available if called directly or for testing.
-    LOG_FILE=${LOG_FILE:-/dev/null}
-
-    # show_step and show_progress might not be available if not sourced by main script.
-    # Consider passing them as parameters or using simple echo for standalone testing.
-    type show_step &>/dev/null && show_step "YUBIKEY" "Installing YubiKey Support Tools" || echo "Installing YubiKey Support Tools..."
-
-
-    # Package names might need verification for Debian Trixie
-    # yubikey-personalization provides ykpersonalize (used by yubikey-luks-enroll)
-    # yubikey-luks is a helper script package, often includes yubikey-luks-enroll, yubikey-luks-open
-    # pcscd is the smart card daemon
-    # libpam-yubico is for PAM integration (may not be strictly needed for this ZFS key part, but good to have)
-    local yubikey_packages="yubikey-personalization yubikey-luks pcscd libpam-yubico"
-
-    type show_progress &>/dev/null && show_progress "Installing YubiKey support packages: $yubikey_packages..." || echo "Installing YubiKey packages..."
-    apt-get update >> "$LOG_FILE" 2>&1
-    if ! apt-get install -y --no-install-recommends $yubikey_packages >> "$LOG_FILE" 2>&1; then
-        log_error "Failed to install YubiKey packages. Check $LOG_FILE."
-        type show_error &>/dev/null && show_error "Failed to install YubiKey support packages. YubiKey functionality will be unavailable." || echo "Error: Failed to install YubiKey packages."
-        return 1
-    fi
-
-    type show_progress &>/dev/null && show_progress "Enabling pcscd service..." || echo "Enabling pcscd service..."
-    if ! systemctl enable pcscd >> "$LOG_FILE" 2>&1; then
-        log_warning "Failed to enable pcscd service. YubiKey might not work correctly."
-        type show_warning &>/dev/null && show_warning "Failed to enable pcscd service. YubiKey might not work correctly." || echo "Warning: Failed to enable pcscd."
-    fi
-
-    type show_success &>/dev/null && show_success "YubiKey support tools installed." || echo "YubiKey tools installed."
-    log_debug "Exiting function: ${FUNCNAME[0]} (yubikey_setup.sh)"
-    return 0
-}
-
 # This function will be called from the main installer environment, not chroot.
 setup_yubikey_luks_partition() {
     log_debug "Entering function: ${FUNCNAME[0]} (yubikey_setup.sh)"

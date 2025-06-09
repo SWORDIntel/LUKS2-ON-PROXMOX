@@ -267,7 +267,7 @@ PREREQ="" # Adjust if it needs to run after specific ZFS scripts, though local-t
 
 # Simple logger for initramfs, prepends script name
 log_this() {
-    echo "ykzfs_unlock: $1" >&2 # Output to stderr, often captured in boot logs
+    echo "ykzfs_unlock: "$1"" >&2 # Output to stderr, often captured in boot logs
 }
 
 log_this "Starting YubiKey ZFS key unlock process..."

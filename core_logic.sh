@@ -222,32 +222,3 @@ finalize() {
     
     log_debug "Exiting function: ${FUNCNAME[0]}"
 }
-
-# ANNOTATION: Placeholder for main execution flow modification.
-# The call to setup_yubikey_luks_partition should be integrated into
-# the main script that orchestrates the installation steps (e.g., installer.sh).
-# It should be placed AFTER partition_and_format_disks and BEFORE setup_zfs_pool.
-#
-# Example of how it would look in the main execution flow:
-#
-# partition_and_format_disks
-#
-# # Setup YubiKey LUKS partition for ZFS key if selected
-# if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]}" == "yes" && "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]}" == "yes" ]]; then
-#     # Ensure YUBIKEY_KEY_PART was actually set by disk_operations.sh
-#     if [[ -n "${CONFIG_VARS[YUBIKEY_KEY_PART]}" ]]; then
-#         if ! setup_yubikey_luks_partition; then
-#             show_error "Failed to set up YubiKey LUKS partition for ZFS key. Aborting."
-#             # Consider if cleanup is needed or if trap will handle it
-#             exit 1
-#         fi
-#         show_success "YubiKey LUKS partition for ZFS key configured."
-#     else
-#         show_error "YubiKey for ZFS key was selected, but the dedicated partition (YUBIKEY_KEY_PART) was not defined by disk_operations.sh. This is an internal error. Aborting."
-#         exit 1
-#     fi
-# fi
-#
-# setup_zfs_pool
-#
-# ... other steps ...
