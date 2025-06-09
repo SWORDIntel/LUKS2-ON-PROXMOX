@@ -60,30 +60,43 @@ setup_zfs_pool() {
         local encryption_algorithm="${CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]:-aes-256-gcm}"
         log_info "Enabling ZFS native encryption with algorithm: $encryption_algorithm"
 
-        # Prompt for ZFS passphrase
-        local zfs_pass
-        zfs_pass=$(dialog --title "ZFS Native Encryption Passphrase" --passwordbox "Enter new ZFS passphrase for pool '${CONFIG_VARS[ZFS_POOL_NAME]}':" 10 70 3>&1 1>&2 2>&3)
-        if [[ -z "$zfs_pass" ]]; then # Check if empty or user pressed Cancel
-            show_error "ZFS passphrase entry cancelled or empty."
-            return 1
-        fi
+        if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" == "yes" ]]; then
+            # YubiKey for ZFS key is enabled. Key comes from a file provided by initramfs.
+            log_info "ZFS key will be sourced from a YubiKey-protected LUKS partition via initramfs."
+            log_info "Keyfile expected at: file:///run/zfs_key.bin (to be set up by initramfs scripts)."
+            # No passphrase prompt needed here for ZFS pool itself.
+            # The keyfile is protected by the YubiKey LUKS partition's own passphrase/YubiKey.
 
-        local zfs_pass_confirm
-        zfs_pass_confirm=$(dialog --title "ZFS Native Encryption Passphrase" --passwordbox "Confirm ZFS passphrase:" 10 70 3>&1 1>&2 2>&3)
-        if [[ "$zfs_pass" != "$zfs_pass_confirm" ]]; then
-            show_error "ZFS passphrases do not match."
-            return 1
-        fi
-        # Pass the passphrase via environment variable for zpool create
-        # This is a common method to avoid it appearing in process lists directly.
-        # Ensure ZFS_PASSPHRASE is unset after the command.
-        export ZFS_PASSPHRASE="$zfs_pass"
+            zfs_encryption_opts=(
+                -O encryption="$encryption_algorithm"
+                -O keyformat=raw
+                -O keylocation="file:///run/zfs_key.bin" # Path within initramfs
+            )
+            # No ZFS_PASSPHRASE export/unset needed for file-based key.
+        else
+            # Standard passphrase-based ZFS native encryption.
+            log_info "ZFS key will be passphrase-based (prompt during import/load)."
+            local zfs_pass
+            zfs_pass=$(dialog --title "ZFS Native Encryption Passphrase" --passwordbox "Enter new ZFS passphrase for pool '${CONFIG_VARS[ZFS_POOL_NAME]}':" 10 70 3>&1 1>&2 2>&3)
+            if [[ -z "$zfs_pass" ]]; then
+                show_error "ZFS passphrase entry cancelled or empty."
+                return 1
+            fi
 
-        zfs_encryption_opts=(
-            -O encryption="$encryption_algorithm"
-            -O keyformat=passphrase
-            -O keylocation=prompt # Initramfs will prompt
-        )
+            local zfs_pass_confirm
+            zfs_pass_confirm=$(dialog --title "ZFS Native Encryption Passphrase" --passwordbox "Confirm ZFS passphrase:" 10 70 3>&1 1>&2 2>&3)
+            if [[ "$zfs_pass" != "$zfs_pass_confirm" ]]; then
+                show_error "ZFS passphrases do not match."
+                return 1
+            fi
+            export ZFS_PASSPHRASE="$zfs_pass"
+
+            zfs_encryption_opts=(
+                -O encryption="$encryption_algorithm"
+                -O keyformat=passphrase
+                -O keylocation=prompt # Initramfs will prompt if not loaded
+            )
+        fi
         log_debug "ZFS encryption options: ${zfs_encryption_opts[*]}"
     fi
 
@@ -137,14 +150,14 @@ setup_zfs_pool() {
     show_progress "Creating ZFS pool '$pool_name'..."
     if ! "${zpool_create_cmd[@]}" &>> "$LOG_FILE"; then
         show_error "Failed to create ZFS pool. Check logs for details."
-        if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" ]]; then
+        if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" && "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" != "yes" ]]; then
             unset ZFS_PASSPHRASE
             log_debug "ZFS_PASSPHRASE environment variable unset after failure."
         fi
         return 1
     fi
 
-    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" ]]; then
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" && "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" != "yes" ]]; then
         unset ZFS_PASSPHRASE
         log_debug "ZFS_PASSPHRASE environment variable unset."
     fi

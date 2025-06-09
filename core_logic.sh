@@ -101,6 +101,7 @@ source ./encryption_logic.sh
 source ./zfs_logic.sh
 source ./system_config.sh
 source ./bootloader_logic.sh
+source ./yubikey_setup.sh
 
 gather_user_options() {
     log_debug "Entering function: ${FUNCNAME[0]}"
@@ -116,6 +117,8 @@ gather_user_options() {
 
     # Initialize default values for ZFS native encryption
     CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="no"
+    CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]="no"
+    CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]="6" # Default slot
     CONFIG_VARS[ZFS_ENCRYPTION_ALGORITHM]="aes-256-gcm"
 
     # --- ZFS, Encryption, Clover, and Network TUIs ---
@@ -147,6 +150,31 @@ gather_user_options() {
     else
         CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="no"
         log_debug "User opted not to use ZFS native encryption."
+    fi
+
+    # Prompts for YubiKey for ZFS key if ZFS native encryption is enabled
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]}" == "yes" ]]; then
+        if _prompt_user_yes_no "Use a YubiKey to store and protect the ZFS native encryption key?
+(This will use a small dedicated LUKS partition on the primary disk, unlocked by YubiKey, to hold the ZFS pool key.)" "YubiKey for ZFS Key"; then
+            CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]="yes"
+            log_debug "User opted to use YubiKey for ZFS native encryption key."
+
+            local yk_slot
+            yk_slot=$(dialog --title "YubiKey Slot for ZFS Key" --inputbox "Enter the YubiKey slot to use for the ZFS key LUKS partition (1-16).
+It's recommended to use a different slot than any general LUKS YubiKey.
+Default is 6 (often used by yubikey-luks tools for secondary keys):" 12 70 "6" 3>&1 1>&2 2>&3)
+            local exit_status_yk_slot=$?
+            if [[ $exit_status_yk_slot -eq 0 ]] && [[ -n "$yk_slot" ]] && [[ "$yk_slot" -ge 1 ]] && [[ "$yk_slot" -le 16 ]]; then
+                CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]="$yk_slot"
+            else
+                log_warning "Invalid or no YubiKey slot entered for ZFS key, defaulting to 6."
+                CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]="6" # Default to 6 if invalid or cancelled
+            fi
+            log_debug "YubiKey slot for ZFS key LUKS partition set to: ${CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]}"
+        else
+            CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]="no"
+            log_debug "User opted not to use YubiKey for ZFS native encryption key."
+        fi
     fi
 
     # Example for Clover prompt
@@ -194,3 +222,32 @@ finalize() {
     
     log_debug "Exiting function: ${FUNCNAME[0]}"
 }
+
+# ANNOTATION: Placeholder for main execution flow modification.
+# The call to setup_yubikey_luks_partition should be integrated into
+# the main script that orchestrates the installation steps (e.g., installer.sh).
+# It should be placed AFTER partition_and_format_disks and BEFORE setup_zfs_pool.
+#
+# Example of how it would look in the main execution flow:
+#
+# partition_and_format_disks
+#
+# # Setup YubiKey LUKS partition for ZFS key if selected
+# if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]}" == "yes" && "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]}" == "yes" ]]; then
+#     # Ensure YUBIKEY_KEY_PART was actually set by disk_operations.sh
+#     if [[ -n "${CONFIG_VARS[YUBIKEY_KEY_PART]}" ]]; then
+#         if ! setup_yubikey_luks_partition; then
+#             show_error "Failed to set up YubiKey LUKS partition for ZFS key. Aborting."
+#             # Consider if cleanup is needed or if trap will handle it
+#             exit 1
+#         fi
+#         show_success "YubiKey LUKS partition for ZFS key configured."
+#     else
+#         show_error "YubiKey for ZFS key was selected, but the dedicated partition (YUBIKEY_KEY_PART) was not defined by disk_operations.sh. This is an internal error. Aborting."
+#         exit 1
+#     fi
+# fi
+#
+# setup_zfs_pool
+#
+# ... other steps ...

@@ -12,7 +12,7 @@ install_base_system() {
     show_success "Boot and EFI partitions mounted."
 
     show_progress "Installing Debian base system (this will take several minutes)..."
-    local debian_release="bookworm"
+    local debian_release="trixie"
     local debian_mirror="http://deb.debian.org/debian"
 
     # debootstrap logic is good, keeping it.
@@ -89,13 +89,23 @@ EOF
 
         # --- APT and Proxmox Repos ---
         cat > /etc/apt/sources.list << EOF
-deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
-deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian/ trixie main contrib non-free non-free-firmware
+deb http://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian/ trixie-updates main contrib non-free non-free-firmware
 EOF
         wget -q -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg http://download.proxmox.com/debian/proxmox-release-bookworm.gpg
         echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-install-repo.list
         
+        cat > /etc/apt/preferences.d/proxmox-pinning << EOF_PINNING
+Package: proxmox-ve pve-firmware pve-kernel-* qemu-server libpve-access-control libpve-common-perl libpve-guest-common-perl libpve-http-server-perl libpve-storage-perl libqb100 libproxmox-backup-qemu0 libpve-cluster-api-perl libpve-cluster-perl corosync criu libcorosync-common4 libcfg7 libcmap4 libcvsservice23 libnozzle1 libquorum5 libvotequorum8 pve-cluster pve-container pve-docs pve-edk2-firmware pve-firewall pve-ha-manager pve-i18n pve-qemu-kvm pve-xtermjs spiceterm libspice-server1 vncterm qmextract
+Pin: release n=bookworm,o=Proxmox
+Pin-Priority: 1001
+
+Package: *
+Pin: release n=bookworm,o=Proxmox
+Pin-Priority: 500
+EOF_PINNING
+
         # --- Package Installation ---
         apt-get update
         export DEBIAN_FRONTEND=noninteractive
@@ -107,8 +117,9 @@ EOF
         else
             PACKAGES+=" grub-pc"
         fi
-        if [ "@@USE_YUBIKEY@@" == "yes" ]; then
-            PACKAGES+=" yubikey-luks libpam-yubico pcscd"
+        # If either general LUKS YubiKey or YubiKey for ZFS key is used, install tools
+        if [ "@@USE_YUBIKEY@@" == "yes" ] || [ "@@USE_YUBIKEY_FOR_ZFS_KEY@@" == "yes" ]; then
+            PACKAGES+=" yubikey-luks libpam-yubico pcscd yubikey-personalization"
             systemctl enable pcscd
         fi
         apt-get install -y --no-install-recommends $PACKAGES
@@ -185,6 +196,7 @@ CHROOT_SCRIPT_TPL
         -e "s|@@GRUB_MODE@@|${CONFIG_VARS[EFFECTIVE_GRUB_MODE]}|g" \
         -e "s|@@PRIMARY_DISK@@|${primary_disk_for_grub}|g" \
         -e "s|@@USE_YUBIKEY@@|${CONFIG_VARS[USE_YUBIKEY]:-no}|g" \
+        -e "s|@@USE_YUBIKEY_FOR_ZFS_KEY@@|${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}|g" \
         /mnt/tmp/configure.sh.tpl > /mnt/tmp/configure.sh
     chmod +x /mnt/tmp/configure.sh
     rm /mnt/tmp/configure.sh.tpl

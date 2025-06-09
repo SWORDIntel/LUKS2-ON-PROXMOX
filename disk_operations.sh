@@ -152,10 +152,26 @@ partition_and_format_disks() {
     local exit_code_sgdisk_n2=$?
     log_debug "Exit code for sgdisk Boot part on \"$primary_target\": $exit_code_sgdisk_n2"
 
-    log_debug "Executing: sgdisk -n 3:0:0 -t 3:BF01 -c 3:LUKS-ZFS \"$primary_target\""
-    sgdisk -n 3:0:0    -t 3:BF01 -c 3:LUKS-ZFS "$primary_target" &>> "$LOG_FILE"
-    local exit_code_sgdisk_n3=$?
-    log_debug "Exit code for sgdisk LUKS-ZFS part on \"$primary_target\": $exit_code_sgdisk_n3"
+    if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]}" == "yes" ]]; then
+        log_debug "USE_YUBIKEY_FOR_ZFS_KEY is yes. Creating YK-ZFS-KEY partition."
+        log_debug "Executing: sgdisk -n 3:0:+256M -t 3:8300 -c 3:YK-ZFS-KEY \"$primary_target\""
+        sgdisk -n 3:0:+256M -t 3:8300 -c 3:YK-ZFS-KEY "$primary_target" &>> "$LOG_FILE"
+        local exit_code_sgdisk_n3_yk=$?
+        log_debug "Exit code for sgdisk YK-ZFS-KEY part on \"$primary_target\": $exit_code_sgdisk_n3_yk"
+
+        log_debug "Executing: sgdisk -n 4:0:0 -t 4:BF01 -c 4:LUKS-ZFS \"$primary_target\""
+        sgdisk -n 4:0:0    -t 4:BF01 -c 4:LUKS-ZFS "$primary_target" &>> "$LOG_FILE"
+        local exit_code_sgdisk_n4_luks=$?
+        log_debug "Exit code for sgdisk LUKS-ZFS part (#4) on \"$primary_target\": $exit_code_sgdisk_n4_luks"
+    else
+        log_debug "USE_YUBIKEY_FOR_ZFS_KEY is no or not set. Creating LUKS-ZFS partition as #3."
+        log_debug "Executing: sgdisk -n 3:0:0 -t 3:BF01 -c 3:LUKS-ZFS \"$primary_target\""
+        sgdisk -n 3:0:0    -t 3:BF01 -c 3:LUKS-ZFS "$primary_target" &>> "$LOG_FILE"
+        local exit_code_sgdisk_n3_luks=$?
+        log_debug "Exit code for sgdisk LUKS-ZFS part (#3) on \"$primary_target\": $exit_code_sgdisk_n3_luks"
+        # Ensure YUBIKEY_KEY_PART is cleared if not used
+        CONFIG_VARS[YUBIKEY_KEY_PART]=""
+    fi
 
     # Additional disk partitioning (unchanged, it's good)
     for i in $(seq 1 $((${#target_disks_arr[@]}-1))); do
@@ -188,6 +204,17 @@ partition_and_format_disks() {
     CONFIG_VARS[EFI_PART]="${primary_target}${p_prefix}1"
     CONFIG_VARS[BOOT_PART]="${primary_target}${p_prefix}2"
     
+    if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]}" == "yes" ]]; then
+        local p_prefix_yk=""
+        [[ "$primary_target" == /dev/nvme* ]] && p_prefix_yk="p"
+        CONFIG_VARS[YUBIKEY_KEY_PART]="${primary_target}${p_prefix_yk}3"
+        log_debug "YubiKey LUKS Key partition set to: ${CONFIG_VARS[YUBIKEY_KEY_PART]}"
+    else
+        # Ensure YUBIKEY_KEY_PART is explicitly cleared if not using YubiKey for ZFS key
+        CONFIG_VARS[YUBIKEY_KEY_PART]=""
+        log_debug "YubiKey LUKS Key partition is not used and cleared."
+    fi
+
     log_debug "Executing: mkfs.vfat -F32 \"${CONFIG_VARS[EFI_PART]}\""
     mkfs.vfat -F32 "${CONFIG_VARS[EFI_PART]}" &>> "$LOG_FILE"
     local exit_code_mkfs_vfat=$?
@@ -198,18 +225,27 @@ partition_and_format_disks() {
     local exit_code_mkfs_ext4=$?
     log_debug "Exit code for mkfs.ext4 on \"${CONFIG_VARS[BOOT_PART]}\": $exit_code_mkfs_ext4"
 
-    # Identify LUKS partitions (unchanged, it's good)
+    # Identify LUKS partitions
     local luks_partitions=()
+    local primary_luks_part_num="3" # Default if YubiKey for ZFS key is not used
+    if [[ "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]}" == "yes" ]]; then
+        primary_luks_part_num="4"
+        log_debug "Primary LUKS partition number set to 4 (YubiKey for ZFS key is enabled)."
+    else
+        log_debug "Primary LUKS partition number set to 3 (YubiKey for ZFS key is not enabled)."
+    fi
+
     for disk in "${target_disks_arr[@]}"; do
         p_prefix=""
         [[ "$disk" == /dev/nvme* ]] && p_prefix="p"
         if [[ "$disk" == "$primary_target" ]]; then
-            luks_partitions+=("${disk}${p_prefix}3")
+            luks_partitions+=("${disk}${p_prefix}${primary_luks_part_num}")
         else
-            luks_partitions+=("${disk}${p_prefix}1")
+            luks_partitions+=("${disk}${p_prefix}1") # Mirrored disks use partition 1
         fi
     done
     CONFIG_VARS[LUKS_PARTITIONS]="${luks_partitions[*]}"
+    log_debug "LUKS partitions identified as: ${CONFIG_VARS[LUKS_PARTITIONS]}"
     
     show_success "All disks partitioned successfully."
     
@@ -217,6 +253,7 @@ partition_and_format_disks() {
     show_progress "Verifying new partitions..."
     log_debug "Verifying EFI partition: ${CONFIG_VARS[EFI_PART]}"
     log_debug "Verifying Boot partition: ${CONFIG_VARS[BOOT_PART]}"
+    log_debug "Verifying YubiKey Key partition: ${CONFIG_VARS[YUBIKEY_KEY_PART]}"
     log_debug "Verifying LUKS partitions: ${CONFIG_VARS[LUKS_PARTITIONS]}" # Log the whole list
 
     # Check that all expected partitions exist and are recognized by the system
@@ -231,6 +268,12 @@ partition_and_format_disks() {
     # Check boot partition
     if [[ ! -b "${CONFIG_VARS[BOOT_PART]}" ]]; then
         show_error "Boot partition ${CONFIG_VARS[BOOT_PART]} not found or not a block device" "$(basename "$0")" "$LINENO"
+        missing_partitions=true
+    fi
+
+    # Check YubiKey Key partition
+    if [[ -n "${CONFIG_VARS[YUBIKEY_KEY_PART]}" && ! -b "${CONFIG_VARS[YUBIKEY_KEY_PART]}" ]]; then
+        show_error "YubiKey Key partition ${CONFIG_VARS[YUBIKEY_KEY_PART]} not found or not a block device"
         missing_partitions=true
     fi
     

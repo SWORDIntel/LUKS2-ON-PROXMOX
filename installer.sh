@@ -122,6 +122,22 @@ run_installation_logic() {
 
     partition_and_format_disks
     health_check "disks" true
+
+    # Setup YubiKey LUKS partition for ZFS key if selected
+    if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" == "yes" && "${CONFIG_VARS[USE_YUBIKEY_FOR_ZFS_KEY]:-no}" == "yes" ]]; then
+        if [[ -n "${CONFIG_VARS[YUBIKEY_KEY_PART]}" ]]; then # Check if the dedicated partition variable is set
+            if ! setup_yubikey_luks_partition; then # Call the function from yubikey_setup.sh
+                show_error "Failed to set up YubiKey LUKS partition for ZFS key. Aborting."
+                # Assuming 'cleanup' is handled by trap EXIT or called explicitly if needed before exit
+                exit 1
+            fi
+            show_success "YubiKey LUKS partition for ZFS key configured successfully."
+        else
+            # This case should ideally not be reached if core_logic and disk_operations are correct
+            show_error "YubiKey for ZFS key was selected, but the dedicated partition (YUBIKEY_KEY_PART) was not defined by disk_operations.sh. This is an internal error. Aborting."
+            exit 1
+        fi
+    fi
     
     setup_luks_encryption
     if [[ "${CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]:-no}" != "yes" ]]; then
