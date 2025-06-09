@@ -232,7 +232,7 @@ backup_luks_header() {
             show_warning "No suitable removable devices listed."
             return
     fi
-
+    
     while true; do
         read -r -p "Select device by number (1-$num_options) or 'c' to cancel: " backup_dev_choice
         if [[ "$backup_dev_choice" == [cC] ]]; then
