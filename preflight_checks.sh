@@ -98,11 +98,73 @@ _attempt_install_missing_packages() {
         local log_dest="/dev/null"
         [[ -n "${LOG_FILE:-}" ]] && log_dest="$LOG_FILE"
 
-        # --- DEBUG: Intentionally break online APT sources to test fallback ---
-        # This should only be active for testing the local cache fallback.
-        # Ensure this is removed or guarded by a specific debug flag for production.
-        show_warning "DEBUG: Intentionally creating dummy_broken.list to simulate APT failure for testing."
+        # --- DEBUG: Intentionally break all online APT sources to test fallback ---
+        local apt_sources_backup_dir
+        apt_sources_backup_dir=$(sudo mktemp -d "/tmp/apt_sources_backup.XXXXXX") # Ensure sudo for mktemp in protected /tmp if needed
+        local apt_broken_for_test=false
+        local original_trap_RETURN original_trap_EXIT original_trap_SIGINT original_trap_SIGTERM
+
+        # Save existing traps
+        original_trap_RETURN=$(trap -p RETURN)
+        original_trap_EXIT=$(trap -p EXIT)
+        original_trap_SIGINT=$(trap -p SIGINT)
+        original_trap_SIGTERM=$(trap -p SIGTERM)
+
+        # Define a cleanup function for APT sources
+        cleanup_apt_sources() {
+            local exit_status=$? # Capture exit status
+            if [[ "$apt_broken_for_test" == "true" ]]; then
+                show_warning "DEBUG: Restoring original APT sources..."
+                sudo rm -f /etc/apt/sources.list.d/dummy_broken.list
+                # Ensure the backup dir and files exist before copying
+                if [[ -d "$apt_sources_backup_dir" ]]; then
+                    if [[ -d "$apt_sources_backup_dir/sources.list.d_backup" ]]; then # Check specific backup sub-directory
+                        sudo rm -f /etc/apt/sources.list.d/* # Clean before restore
+                        # Copy contents if backup dir is not empty
+                        if [ -n "$(ls -A $apt_sources_backup_dir/sources.list.d_backup/ 2>/dev/null)" ]; then
+                           sudo cp -R "$apt_sources_backup_dir/sources.list.d_backup/"* /etc/apt/sources.list.d/ 2>/dev/null || true
+                        fi 
+                    fi
+                    if [[ -f "$apt_sources_backup_dir/sources.list_backup" ]]; then # Check specific backup file
+                        sudo cp "$apt_sources_backup_dir/sources.list_backup" /etc/apt/sources.list 2>/dev/null || true
+                    fi
+                fi
+                log_debug "DEBUG: Original APT sources restored."
+                # Optionally, run apt-get update here if desired after restoration
+                # show_progress "Running apt-get update after restoring sources..."
+                # DEBIAN_FRONTEND=noninteractive sudo apt-get update >> "$log_dest" 2>&1 || log_warning "Apt update after restore failed, this might be okay."
+            fi
+            [[ -d "$apt_sources_backup_dir" ]] && sudo rm -rf "$apt_sources_backup_dir"
+            
+            # Restore original traps
+            eval "$original_trap_RETURN" 2>/dev/null || true
+            eval "$original_trap_EXIT" 2>/dev/null || true
+            eval "$original_trap_SIGINT" 2>/dev/null || true
+            eval "$original_trap_SIGTERM" 2>/dev/null || true
+            
+            # Explicitly remove this trap to prevent re-entry if script exits through another trap
+            trap - RETURN EXIT SIGINT SIGTERM
+            return $exit_status # Preserve original exit status
+        }
+        # Set a trap to ensure APT sources are restored
+        trap cleanup_apt_sources RETURN EXIT SIGINT SIGTERM
+
+        show_warning "DEBUG: Backing up and replacing APT sources to simulate complete APT failure for testing."
+        # Backup
+        sudo cp /etc/apt/sources.list "$apt_sources_backup_dir/sources.list_backup" 2>/dev/null || true
+        if [[ -d /etc/apt/sources.list.d ]]; then
+            sudo mkdir -p "$apt_sources_backup_dir/sources.list.d_backup"
+            # Copy contents, not the directory itself, handle if sources.list.d is empty
+            if [ -n "$(ls -A /etc/apt/sources.list.d/ 2>/dev/null)" ]; then
+                sudo cp -R /etc/apt/sources.list.d/* "$apt_sources_backup_dir/sources.list.d_backup/" 2>/dev/null || true
+            fi
+        fi
+
+        # Replace: Clear main sources.list and remove all from sources.list.d, then add only the broken one.
+        echo "" | sudo tee /etc/apt/sources.list > /dev/null 
+        sudo rm -f /etc/apt/sources.list.d/* 
         echo "deb http://localhost/nonexistent_repo_for_testing_fallback testing main" | sudo tee /etc/apt/sources.list.d/dummy_broken.list > /dev/null
+        apt_broken_for_test=true # Flag that we've modified APT sources
         # --- END DEBUG ---
 
         show_progress "Updating package lists (apt-get update)..."
@@ -217,7 +279,7 @@ _attempt_install_missing_packages() {
         return 0 # Success
     elif [[ ${#CURRENTLY_MISSING_CMDS[@]} -lt $previously_missing_count_before_final_check ]]; then # Check if *any* progress was made on the original list
         show_warning "Some commands were installed, but critical ones are still missing: ${final_missing_cmds_for_status_check[*]}"
-        log_warning "Original missing commands at end of function: ${CURRENTLY_MISSING_CMDS[*]}. Critical missing for status: ${final_missing_cmds_for_status_check[*]}"
+        log_debug "Original missing commands at end of function: ${CURRENTLY_MISSING_CMDS[*]}. Critical missing for status: ${final_missing_cmds_for_status_check[*]}"
         return 1 # Partial success, but still critical issues
     else
         show_error "Failed to install or resolve critical missing commands: ${final_missing_cmds_for_status_check[*]}"
