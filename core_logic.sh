@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 
+# Determine the script's absolute directory for robust sourcing
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source common UI functions - CRITICAL for this script
+# shellcheck source=ui_functions.sh
+if [[ -f "${SCRIPT_DIR}/ui_functions.sh" ]]; then
+    source "${SCRIPT_DIR}/ui_functions.sh"
+else
+    echo "Critical Error: ui_functions.sh not found in ${SCRIPT_DIR}. This script cannot run without UI functions. Exiting." >&2
+    exit 1
+fi
+
+
 #############################################################
 # Core Logic Functions
 #############################################################
@@ -102,7 +115,7 @@ gather_user_options() {
     # ... Just ensure any simple yes/no dialogs are replaced with prompt_yes_no for robustness.
 
     # ZFS Native Encryption Prompts
-    if prompt_yes_no "Enable native ZFS encryption for the root pool?"; then # Titel "ZFS Native Encryption" ignored
+    if prompt_yes_no "Enable ZFS native encryption for the root pool? (This encrypts the ZFS datasets directly. If 'no', standard LUKS2 full disk encryption will be used for the ZFS pool members.)"; then # Title "ZFS Native Encryption" ignored
         CONFIG_VARS[ZFS_NATIVE_ENCRYPTION]="yes"
         local alg_choice
         echo "Select ZFS encryption algorithm (aes-256-gcm is recommended):"
@@ -152,8 +165,31 @@ gather_user_options() {
 
     # Example for Clover prompt
     if prompt_yes_no "Install Clover bootloader on a separate drive?"; then # Title "Clover Bootloader Support" ignored
-        # ... logic to select Clover disk ...
         CONFIG_VARS[USE_CLOVER]="yes"
+        # Check for p7zip (7z command) if Clover is selected
+        if ! command -v 7z &>/dev/null; then
+            show_warning "The '7z' command (from p7zip-full) is required for Clover setup but is not found."
+            if prompt_yes_no "Attempt to install p7zip-full now?" "Install p7zip-full"; then
+                # Ensure package_management.sh functions are available
+                # source "${SCRIPT_DIR}/package_management.sh" # This should already be sourced by main script
+                if ensure_packages_installed "p7zip-full"; then
+                    show_success "p7zip-full installed successfully."
+                else
+                    show_error "Failed to install p7zip-full. Clover setup cannot proceed."
+                    show_warning "Disabling Clover installation due to missing dependency."
+                    CONFIG_VARS[USE_CLOVER]="no"
+                fi
+            else
+                show_warning "User declined to install p7zip-full. Clover setup cannot proceed."
+                show_warning "Disabling Clover installation."
+                CONFIG_VARS[USE_CLOVER]="no"
+            fi
+        fi
+
+        if [[ "${CONFIG_VARS[USE_CLOVER]}" == "yes" ]]; then
+            # ... logic to select Clover disk ...
+            log_info "Clover bootloader installation selected and p7zip dependency met (or was pre-existing)."
+        fi
     else
         CONFIG_VARS[USE_CLOVER]="no"
     fi

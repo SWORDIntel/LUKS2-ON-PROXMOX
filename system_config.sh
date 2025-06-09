@@ -18,9 +18,8 @@ install_base_system() {
     # debootstrap logic is good, keeping it.
     log_debug "Starting debootstrap..."
     echo "--- Debootstrap Output Start ---" >> "$LOG_FILE"
-    debootstrap --arch=amd64 --include=locales,vim,openssh-server,wget,curl,ca-certificates \
-        "$debian_release" /mnt "$debian_mirror" >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
+    if ! debootstrap --arch=amd64 --include=locales,vim,openssh-server,wget,curl,ca-certificates \
+        "$debian_release" /mnt "$debian_mirror" >> "$LOG_FILE" 2>&1; then
         echo "--- Debootstrap Output End ---" >> "$LOG_FILE"
         show_error "Debootstrap failed. Check $LOG_FILE for details."
         exit 1
@@ -61,11 +60,21 @@ configure_new_system() {
 
     # Get root password. Logic is good.
     local root_pass root_pass_confirm
-    root_pass=$(dialog --title "Root Password" --passwordbox "Enter root password for new system:" 10 60 3>&1 1>&2 2>&3) || exit 1
-    root_pass_confirm=$(dialog --title "Root Password" --passwordbox "Confirm root password:" 10 60 3>&1 1>&2 2>&3) || exit 1
-    if [[ "$root_pass" != "$root_pass_confirm" ]] || [[ -z "$root_pass" ]]; then
-        show_error "Passwords do not match or are empty." && exit 1
-    fi
+    while true; do
+        read -s -r -p "Enter root password for new system: " root_pass
+        echo # Add a newline after password input
+        if [[ -z "$root_pass" ]]; then
+            show_error "Password cannot be empty. Please try again."
+            continue
+        fi
+        read -s -r -p "Confirm root password: " root_pass_confirm
+        echo # Add a newline
+        if [[ "$root_pass" == "$root_pass_confirm" ]]; then
+            break
+        else
+            show_error "Passwords do not match. Please try again."
+        fi
+    done
 
     # ANNOTATION: Create a self-contained chroot script. This is more robust than exporting variables.
     # We use placeholders like @@HOSTNAME@@ that we will replace with `sed`.
@@ -188,9 +197,13 @@ CHROOT_SCRIPT_TPL
     fi
 
     # Fstab and Crypttab Config
-    local fstab_config="# /etc/fstab\nUUID=$(blkid -s UUID -o value "${CONFIG_VARS[BOOT_PART]}") /boot ext4 defaults 0 2\n"
+    local fstab_config boot_uuid
+    boot_uuid=$(blkid -s UUID -o value "${CONFIG_VARS[BOOT_PART]}")
+    fstab_config="# /etc/fstab\nUUID=${boot_uuid} /boot ext4 defaults 0 2\n"
     if [[ "${CONFIG_VARS[EFFECTIVE_GRUB_MODE]}" == "UEFI" ]]; then
-        fstab_config+="UUID=$(blkid -s UUID -o value "${CONFIG_VARS[EFI_PART]}") /boot/efi vfat umask=0077 0 1"
+        local efi_uuid
+        efi_uuid=$(blkid -s UUID -o value "${CONFIG_VARS[EFI_PART]}")
+        fstab_config+="UUID=${efi_uuid} /boot/efi vfat umask=0077 0 1"
     fi
 
     local crypttab_opts="luks,discard"
@@ -200,12 +213,14 @@ CHROOT_SCRIPT_TPL
     if [[ "${CONFIG_VARS[USE_DETACHED_HEADERS]}" == "yes" ]]; then
         local header_files_arr=(); read -r -a header_files_arr <<< "${CONFIG_VARS[HEADER_FILENAMES_ON_PART]}"
         for i in "${!luks_partitions_arr[@]}"; do
-            local part_uuid=$(blkid -s UUID -o value "${luks_partitions_arr[$i]}")
+            local part_uuid
+            part_uuid=$(blkid -s UUID -o value "${luks_partitions_arr[$i]}")
             crypttab_config+="${CONFIG_VARS[LUKS_MAPPER_NAME]}_$i UUID=$part_uuid none $crypttab_opts,header=UUID=${CONFIG_VARS[HEADER_PART_UUID]}:${header_files_arr[$i]}\n"
         done
     else
         for i in "${!luks_partitions_arr[@]}"; do
-            local part_uuid=$(blkid -s UUID -o value "${luks_partitions_arr[$i]}")
+            local part_uuid
+            part_uuid=$(blkid -s UUID -o value "${luks_partitions_arr[$i]}")
             crypttab_config+="${CONFIG_VARS[LUKS_MAPPER_NAME]}_$i UUID=$part_uuid none $crypttab_opts\n"
         done
     fi

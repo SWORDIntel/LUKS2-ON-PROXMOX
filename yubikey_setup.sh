@@ -3,7 +3,7 @@
 
 # Ensure this script is sourced, not executed directly, if needed by other scripts.
 # The variable SCRIPT_BEING_SOURCED will be set by the sourcing script.
-if [[ -z "$SCRIPT_BEING_SOURCED" ]]; then
+if [[ -z "${SCRIPT_BEING_SOURCED:-}" ]]; then
     if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         echo "This script should be sourced, not executed directly." >&2
         echo "Set SCRIPT_BEING_SOURCED=true before sourcing if it's part of a larger system." >&2
@@ -35,19 +35,33 @@ setup_yubikey_luks_partition() {
 
     local yk_luks_pass yk_luks_pass_confirm
     
-    yk_luks_pass=$(dialog --title "YubiKey LUKS Key Partition Passphrase" --passwordbox "Enter a NEW passphrase for the YubiKey-protected ZFS key partition ($yubikey_key_part):" 10 70 3>&1 1>&2 2>&3) || { log_debug "YubiKey LUKS passphrase entry cancelled."; return 1; }
-    yk_luks_pass_confirm=$(dialog --title "Confirm Passphrase" --passwordbox "Confirm passphrase for YubiKey LUKS key partition:" 10 70 3>&1 1>&2 2>&3) || { log_debug "YubiKey LUKS passphrase confirmation cancelled."; return 1; }
-
-    if [[ "$yk_luks_pass" != "$yk_luks_pass_confirm" ]] || [[ -z "$yk_luks_pass" ]]; then
-        log_error "YubiKey LUKS passphrases do not match or are empty."
-        show_error "Passphrases for YubiKey LUKS partition do not match or are empty."
-        return 1
-    fi
+    while true; do
+        read -s -r -p "Enter a NEW passphrase for the YubiKey-protected ZFS key partition ($yubikey_key_part): " yk_luks_pass
+        echo
+        if [[ -z "$yk_luks_pass" ]]; then
+            show_error "Passphrase cannot be empty. Please try again."
+            if ! prompt_yes_no "Do you want to try entering the passphrase again?"; then
+                log_debug "YubiKey LUKS passphrase entry cancelled by user."
+                return 1
+            fi
+            continue
+        fi
+        read -s -r -p "Confirm passphrase for YubiKey LUKS key partition: " yk_luks_pass_confirm
+        echo
+        if [[ "$yk_luks_pass" == "$yk_luks_pass_confirm" ]]; then
+            break
+        else
+            show_error "Passphrases do not match. Please try again."
+            if ! prompt_yes_no "Do you want to try entering the passphrase again?"; then
+                log_debug "YubiKey LUKS passphrase confirmation cancelled by user."
+                return 1
+            fi
+        fi
+    done
     
     show_progress "Formatting $yubikey_key_part as LUKS2..."
-    log_debug "Executing: cryptsetup luksFormat --type luks2 "$yubikey_key_part""
-    echo -n "$yk_luks_pass" | cryptsetup luksFormat --type luks2 "$yubikey_key_part" - >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
+    log_debug "Executing: cryptsetup luksFormat --type luks2 \"$yubikey_key_part\" - (with piped passphrase)"
+    if ! { echo -n "$yk_luks_pass" | cryptsetup luksFormat --type luks2 "$yubikey_key_part" - >> "$LOG_FILE" 2>&1; }; then
         log_error "LUKS format failed for $yubikey_key_part. Check $LOG_FILE."
         show_error "Failed to format YubiKey LUKS partition $yubikey_key_part."
         return 1
@@ -55,11 +69,9 @@ setup_yubikey_luks_partition() {
     show_success "$yubikey_key_part formatted for LUKS."
     
     local yk_slot_for_zfs_key="${CONFIG_VARS[YUBIKEY_ZFS_KEY_SLOT]:-6}" # Default to slot 6, can be configured
-    dialog --title "YubiKey Enrollment for ZFS Key" --infobox "Preparing to enroll YubiKey (slot $yk_slot_for_zfs_key) for LUKS partition $yubikey_key_part.
-
-Please follow the upcoming prompts from 'yubikey-luks-enroll'.
-
-You will need to enter the LUKS passphrase for this partition again and touch your YubiKey when it flashes." 12 70
+    show_progress "Preparing to enroll YubiKey (slot $yk_slot_for_zfs_key) for LUKS partition $yubikey_key_part."
+    show_progress "Please follow the upcoming prompts from 'yubikey-luks-enroll'."
+dialog --title "YubiKey Enrollment" --infobox "You will need to enter the LUKS passphrase for this partition again and touch your YubiKey when it flashes." 12 70
     sleep 4
 
     show_progress "Please follow prompts from yubikey-luks-enroll for $yubikey_key_part (slot $yk_slot_for_zfs_key)."
@@ -67,9 +79,7 @@ You will need to enter the LUKS passphrase for this partition again and touch yo
         log_error "YubiKey enrollment failed for $yubikey_key_part. Check console for yubikey-luks-enroll errors."
         show_error "YubiKey enrollment for ZFS key partition $yubikey_key_part failed."
         # Offer to continue without YubiKey for this specific partition, or abort.
-        if dialog --title "YubiKey Enrollment Failed" --yesno "YubiKey enrollment for $yubikey_key_part (slot $yk_slot_for_zfs_key) failed.
-
-Do you want to continue with passphrase-only for this ZFS key partition, or cancel the installation?" 12 70; then
+        if prompt_yes_no "YubiKey enrollment for $yubikey_key_part (slot $yk_slot_for_zfs_key) failed. Do you want to continue with passphrase-only for this ZFS key partition, or cancel the installation?"; then
             log_warning "Continuing with passphrase-only for ZFS key partition $yubikey_key_part."
             show_warning "Continuing with passphrase-only for ZFS key partition."
         else
@@ -83,7 +93,7 @@ Do you want to continue with passphrase-only for this ZFS key partition, or canc
 
     local mapper_name="yubikey_zfs_key_mapper"
     show_progress "Opening LUKS partition $yubikey_key_part as $mapper_name..."
-    log_debug "Executing: cryptsetup open "$yubikey_key_part" "$mapper_name""
+    log_debug "Executing: yubikey-luks-open -d \"$yubikey_key_part\" -n \"$mapper_name\""
     # Try opening with YubiKey first if enrollment was attempted/successful (yubikey-luks-open handles this)
     # If yubikey-luks-enroll was skipped, this will require passphrase.
     if yubikey-luks-open -d "$yubikey_key_part" -n "$mapper_name"; then
@@ -98,8 +108,7 @@ Do you want to continue with passphrase-only for this ZFS key partition, or canc
     
     local mapped_partition="/dev/mapper/$mapper_name"
     show_progress "Formatting $mapped_partition as ext4..."
-    mkfs.ext4 -F "$mapped_partition" >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
+    if ! mkfs.ext4 -F "$mapped_partition" >> "$LOG_FILE" 2>&1; then
         log_error "Failed to format $mapped_partition as ext4. Check $LOG_FILE."
         show_error "Failed to format mapped YubiKey LUKS partition."
         cryptsetup close "$mapper_name" >> "$LOG_FILE" 2>&1
@@ -110,8 +119,7 @@ Do you want to continue with passphrase-only for this ZFS key partition, or canc
     local temp_mount_point="${TEMP_DIR:-/tmp}/yubikey_luks_key_storage" # Use TEMP_DIR if available
     mkdir -p "$temp_mount_point"
     show_progress "Mounting $mapped_partition to $temp_mount_point..."
-    mount "$mapped_partition" "$temp_mount_point" >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
+    if ! mount "$mapped_partition" "$temp_mount_point" >> "$LOG_FILE" 2>&1; then
         log_error "Failed to mount $mapped_partition to $temp_mount_point. Check $LOG_FILE."
         show_error "Failed to mount YubiKey LUKS partition for key generation."
         cryptsetup close "$mapper_name" >> "$LOG_FILE" 2>&1
@@ -126,8 +134,7 @@ Do you want to continue with passphrase-only for this ZFS key partition, or canc
     CONFIG_VARS[ZFS_KEYFILE_PATH_ON_YUBIKEY_LUKS]="/keys/zfs.key" 
 
     show_progress "Generating ZFS keyfile at $zfs_keyfile_on_luks..."
-    openssl rand 32 > "$zfs_keyfile_on_luks"
-    if [[ $? -ne 0 ]] || [[ ! -s "$zfs_keyfile_on_luks" ]]; then
+    if ! openssl rand 32 > "$zfs_keyfile_on_luks" || [[ ! -s "$zfs_keyfile_on_luks" ]]; then
         log_error "Failed to generate ZFS keyfile at $zfs_keyfile_on_luks."
         show_error "Failed to generate ZFS keyfile on YubiKey LUKS partition."
         umount "$temp_mount_point" >> "$LOG_FILE" 2>&1
@@ -141,16 +148,14 @@ Do you want to continue with passphrase-only for this ZFS key partition, or canc
 
     show_progress "Unmounting $temp_mount_point..."
     sync # Ensure data is written before unmounting
-    umount "$temp_mount_point" >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
+    if ! umount "$temp_mount_point" >> "$LOG_FILE" 2>&1; then
         log_warning "Failed to unmount $temp_mount_point. Continuing, but this might indicate an issue."
     fi
     rm -rf "$temp_mount_point"
     
     show_progress "Closing LUKS mapper $mapper_name..."
     sync # Ensure data is written before closing
-    cryptsetup close "$mapper_name" >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
+    if ! cryptsetup close "$mapper_name" >> "$LOG_FILE" 2>&1; then
         log_warning "Failed to close LUKS mapper $mapper_name. Continuing, but this might indicate an issue."
     fi
     

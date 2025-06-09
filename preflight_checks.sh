@@ -1,17 +1,60 @@
 #!/usr/bin/env bash
 
+# Determine the script's absolute directory for robust sourcing
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source common UI functions
+# shellcheck source=ui_functions.sh
+if [[ -f "${SCRIPT_DIR}/ui_functions.sh" ]]; then
+    source "${SCRIPT_DIR}/ui_functions.sh"
+else
+    echo "Error: ui_functions.sh not found in ${SCRIPT_DIR}. Exiting." >&2
+    exit 1
+fi
+
+
 #############################################################
 # Pre-Flight Checks - More Robust Version
 #############################################################
 
 # Helper function to provide a fallback for dialog. Assumed to be in a common utils file.
 _prompt_user_yes_no() {
-    local prompt_text="$1" title="${2:-Confirmation}"
-    if command -v dialog &>/dev/null; then
-        dialog --title "$title" --yesno "$prompt_text" 10 70
+    local prompt_text="$1"
+    # The 'title' variable is no longer used as 'read' doesn't support titles.
+    # Fallback to simple terminal read.
+    while true; do
+        read -r -p "$prompt_text [y/n]: " yn # Added -r for robustness
+        case $yn in
+            [Yy]*) return 0 ;; # Success
+            [Nn]*) return 1 ;; # Failure
+            *) echo "Please answer yes or no." >&2 ;; # Error to stderr
+        esac
+    done
+}
+
+_check_for_proxmox_zfs() {
+    log_debug "Entering function: ${FUNCNAME[0]}"
+    PROXMOX_ZFS_DETECTED="false" # Default to not detected
+
+    if command -v zpool &>/dev/null && zpool list -H -o name rpool &>/dev/null; then
+        log_debug "ZFS pool 'rpool' found."
+        # Optional: Further check for Proxmox specific datasets
+        if command -v zfs &>/dev/null && zfs list -H -o name rpool/ROOT/pve-1 &>/dev/null; then
+            log_debug "Proxmox specific dataset 'rpool/ROOT/pve-1' found."
+            PROXMOX_ZFS_DETECTED="true"
+        elif zfs list -H -o name rpool/data &>/dev/null && zfs list -H -o name rpool/ROOT &>/dev/null; then
+             # Broader check for common PVE ZFS layout if pve-1 doesn't exist (e.g. on new PVE installs before first VM)
+            log_debug "Common Proxmox ZFS datasets 'rpool/data' and 'rpool/ROOT' found."
+            PROXMOX_ZFS_DETECTED="true"
+        else
+            log_debug "Pool 'rpool' exists, but no definitive Proxmox datasets like 'rpool/ROOT/pve-1' or 'rpool/data' found. Assuming not a standard Proxmox ZFS setup for now."
+        fi
     else
-        while true; do read -p "$prompt_text [y/n]: " yn; case $yn in [Yy]*) return 0;; [Nn]*) return 1;; *) echo "Please answer yes or no.";; esac; done
+        log_debug "ZFS pool 'rpool' not found."
     fi
+
+    export PROXMOX_ZFS_DETECTED # Make it available to other sourced scripts
+    log_debug "Exiting function: ${FUNCNAME[0]} - PROXMOX_ZFS_DETECTED=${PROXMOX_ZFS_DETECTED}"
 }
 
 run_system_preflight_checks() {
@@ -31,6 +74,15 @@ run_system_preflight_checks() {
     local total_ram_mb; total_ram_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
     if [[ $total_ram_mb -lt ${MIN_RAM_MB:-4096} ]]; then show_error "Insufficient RAM: ${total_ram_mb}MB" && exit 1; fi
     show_success "Sufficient RAM available: ${total_ram_mb}MB"
+
+    # Check for existing Proxmox-managed ZFS
+    _check_for_proxmox_zfs
+    if [[ "${PROXMOX_ZFS_DETECTED}" == "true" ]]; then
+        show_warning "Proxmox-managed ZFS pool ('rpool') detected. This installer will proceed with caution.
+Ensure you intend to operate on this existing environment or select appropriate options to avoid conflicts."
+    else
+        show_success "No pre-existing Proxmox-managed ZFS pool ('rpool') detected."
+    fi
 
     # ANNOTATION: Use `findmnt` for a more robust disk space check. It's designed for scripts.
     log_debug "Checking available disk space on installer media..."
@@ -54,7 +106,7 @@ run_system_preflight_checks() {
     # --- Simplified and Automated Essential Commands Check ---
     log_debug "Checking for essential commands..."
     show_progress "Checking for essential commands..."
-    local core_utils=(bash awk grep sed mktemp lsblk id uname readlink parted ip ping gdisk cryptsetup debootstrap mkfs.vfat mkfs.ext4 blkid zpool zfs cp curl wget jq p7zip dialog rsync dhclient yubikey-luks-enroll ykman lsusb)
+    local core_utils=(dialog bash awk grep sed mktemp lsblk id uname readlink parted ip ping gdisk cryptsetup debootstrap mkfs.vfat mkfs.ext4 blkid zpool zfs cp curl wget jq rsync dhclient yubikey-luks-enroll lsusb)
     declare -A cmd_to_pkg_map=(
         [mkfs.vfat]="dosfstools" [mkfs.ext4]="e2fsprogs" [dhclient]="isc-dhcp-client"
         [dialog]="dialog" [p7zip]="p7zip-full" [jq]="jq" [zfs]="zfsutils-linux" [zpool]="zfsutils-linux"
@@ -65,6 +117,14 @@ run_system_preflight_checks() {
 
     local missing_cmds=()
     for cmd in "${core_utils[@]}"; do
+        # If Proxmox is detected, skip checking for ZFS commands as Proxmox should provide them.
+        if [[ "${PROXMOX_ZFS_DETECTED:-false}" == "true" ]]; then
+            if [[ "$cmd" == "zfs" || "$cmd" == "zpool" ]]; then
+                log_debug "Proxmox detected, skipping check for ZFS command: $cmd"
+                continue
+            fi
+        fi
+
         if ! command -v "$cmd" &>/dev/null; then
             missing_cmds+=("$cmd")
         fi
